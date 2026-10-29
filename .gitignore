@@ -1,0 +1,26 @@
+# secrets
+.env
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# node
+node_modules/
+web/dist/
+
+# generated / recorded market data (large; regenerate or re-download)
+data/replay/
+data/bhavcopy/
+data/recordings/
+
+# editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
