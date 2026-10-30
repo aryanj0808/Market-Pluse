@@ -1,0 +1,39 @@
+# News feeds polled by ingest-news. `verified = false`: the URL and format come from the
+# publisher's documentation / common knowledge and have NOT been fetched from the development
+# network (it blocks all of them). The poller reports per-feed health, so a wrong URL shows up
+# as an error on the dashboard and in news-mcp, never as silently missing news.
+
+[[feed]]
+name = "et_markets"
+url = "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
+verified = false
+
+[[feed]]
+name = "moneycontrol_markets"
+url = "https://www.moneycontrol.com/rss/marketreports.xml"
+verified = false
+
+[[feed]]
+name = "moneycontrol_business"
+url = "https://www.moneycontrol.com/rss/business.xml"
+verified = false
+
+[[feed]]
+name = "mint_markets"
+url = "https://www.livemint.com/rss/markets"
+verified = false
+
+[[feed]]
+name = "business_standard_markets"
+url = "https://www.business-standard.com/rss/markets-106.rss"
+verified = false
+
+[[feed]]
+name = "nse_announcements"
+url = "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"
+verified = false
+
+[[feed]]
+name = "rbi_press"
+url = "https://www.rbi.org.in/pressreleases_rss.xml"
+verified = false

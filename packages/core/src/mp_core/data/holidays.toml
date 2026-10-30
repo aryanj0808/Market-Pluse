@@ -1,0 +1,9 @@
+# NSE trading holidays (equity & F&O segment), ISO dates.
+#
+# Deliberately empty: this machine's network blocks nseindia.com, and holiday dates
+# must not be guessed. Fill from NSE's official circular ("Trading holidays for the
+# calendar year"). Until a year is listed in `complete_years`, the calendar treats
+# every weekday as a trading day and `calendar.holidays_known(year)` returns False.
+
+complete_years = []
+dates = []

@@ -1,0 +1,22 @@
+[project]
+name = "mp-mcp"
+version = "0.1.0"
+description = "Market Pulse MCP servers: thin, read-only wrappers over mp-core"
+requires-python = ">=3.12,<3.13"
+dependencies = ["mp-core", "mcp>=2.3,<3"]
+
+[project.scripts]
+market-data-mcp = "mp_mcp.market_data:main"
+options-mcp = "mp_mcp.options:main"
+news-mcp = "mp_mcp.news:main"
+signals-mcp = "mp_mcp.signals:main"
+
+[tool.uv.sources]
+mp-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mp_mcp"]

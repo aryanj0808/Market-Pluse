@@ -1,0 +1,29 @@
+[project]
+name = "mp-services"
+version = "0.1.0"
+description = "Market Pulse background services: ingest-market, engine (thin mains over mp-core)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "mp-core",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.scripts]
+ingest-market = "mp_services.ingest_market:main"
+engine = "mp_services.engine:main"
+ingest-news = "mp_services.ingest_news:main"
+evaluator = "mp_services.evaluator:main"
+gateway = "mp_services.gateway:main"
+alerts = "mp_services.alerts:main"
+healthcheck = "mp_services.healthcheck:main"
+
+[tool.uv.sources]
+mp-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mp_services"]

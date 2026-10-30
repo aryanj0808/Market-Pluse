@@ -1,0 +1,183 @@
+# Market Pulse. Infra: redis, timescale. App: ingest-market, engine, market-data-mcp, options-mcp
+# (Phase 3); ingest-news, news-mcp (Phase 4); signals-mcp, evaluator (Phase 5); gateway + web (Phase 6);
+# alerts (Phase 7). MP_PROVIDER=upstox|kite switches ingest-market to a live broker adapter.
+name: market-pulse
+
+# Health: background services write a Redis heartbeat every 5 s; `healthcheck <svc>` fails when it is
+# older than 30 s (stuck, not just crashed). MCP servers and the gateway are checked over the network.
+x-heartbeat: &heartbeat
+  interval: 15s
+  timeout: 5s
+  retries: 3
+  start_period: 20s
+
+x-tcp-check: &tcp_check
+  interval: 15s
+  timeout: 5s
+  retries: 3
+  start_period: 10s
+
+x-app: &app
+  image: market-pulse-app:dev  # built once by ingest-market (see `build:` there)
+  pull_policy: never
+  env_file: ../.env
+  environment:
+    REDIS_URL: redis://redis:6379/0
+    DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
+    MP_REPLAY_DIR: /app/data/replay/synthetic/BANKNIFTY
+  volumes:
+    - ../data:/app/data:ro
+    - ../data/kite:/app/data/kite  # broker instrument lists + OI baseline (written by live adapters)
+    - ../data/upstox:/app/data/upstox
+  depends_on:
+    redis: { condition: service_healthy }
+    timescale: { condition: service_healthy }
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "no", "--save", "", "--maxmemory", "512mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    ports: ["127.0.0.1:6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  timescale:
+    image: timescale/timescaledb:2.17.2-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-market_pulse}
+      TIMESCALEDB_TELEMETRY: "off"
+    ports: ["127.0.0.1:5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./timescale/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  ingest-market:
+    <<: *app
+    build: { context: .., dockerfile: Dockerfile }
+    pull_policy: build
+    command: ["ingest-market"]
+    healthcheck:
+      <<: *heartbeat
+      test: ["CMD", "healthcheck", "ingest-market"]
+    restart: "no"  # a replay ends; a live feed would use unless-stopped
+
+  engine:
+    <<: *app
+    command: ["engine"]
+    healthcheck:
+      <<: *heartbeat
+      test: ["CMD", "healthcheck", "engine"]
+
+  market-data-mcp:
+    <<: *app
+    command: ["market-data-mcp"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
+      MP_MCP_TRANSPORT: streamable-http
+      MP_MCP_HOST: 0.0.0.0
+      MP_MCP_PORT: "8101"
+    ports: ["127.0.0.1:8101:8101"]
+    healthcheck:
+      <<: *tcp_check
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8101), 3)"]
+
+  options-mcp:
+    <<: *app
+    command: ["options-mcp"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MP_MCP_TRANSPORT: streamable-http
+      MP_MCP_HOST: 0.0.0.0
+      MP_MCP_PORT: "8102"
+    ports: ["127.0.0.1:8102:8102"]
+    healthcheck:
+      <<: *tcp_check
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8102), 3)"]
+
+  ingest-news:
+    <<: *app
+    command: ["ingest-news"]
+    healthcheck:
+      <<: *heartbeat
+      test: ["CMD", "healthcheck", "ingest-news"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
+      MP_REPLAY_DIR: /app/data/replay/synthetic/BANKNIFTY
+      # replay at 60x: polling every 5 wall seconds = every 5 market minutes
+      MP_NEWS_POLL_SECONDS: ${MP_NEWS_POLL_SECONDS:-5}
+
+  news-mcp:
+    <<: *app
+    command: ["news-mcp"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MP_MCP_TRANSPORT: streamable-http
+      MP_MCP_HOST: 0.0.0.0
+      MP_MCP_PORT: "8103"
+    ports: ["127.0.0.1:8103:8103"]
+    healthcheck:
+      <<: *tcp_check
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8103), 3)"]
+
+  signals-mcp:
+    <<: *app
+    command: ["signals-mcp"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
+      MP_MCP_TRANSPORT: streamable-http
+      MP_MCP_HOST: 0.0.0.0
+      MP_MCP_PORT: "8104"
+    ports: ["127.0.0.1:8104:8104"]
+    healthcheck:
+      <<: *tcp_check
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8104), 3)"]
+
+  evaluator:
+    <<: *app
+    command: ["evaluator"]  # scores real signals nightly at 18:00 IST; synthetic ones never
+    healthcheck:
+      <<: *heartbeat
+      test: ["CMD", "healthcheck", "evaluator"]
+
+  gateway:  # REST + WebSocket for the dashboard, and the built dashboard itself on /
+    <<: *app
+    command: ["gateway"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
+      MP_GATEWAY_HOST: 0.0.0.0
+      MP_GATEWAY_PORT: "8000"
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:  # "--wait" then means ready to serve, not merely started
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+
+  alerts:  # Telegram; dry run (logs only) until TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set
+    <<: *app
+    command: ["alerts"]
+    healthcheck:
+      <<: *heartbeat
+      test: ["CMD", "healthcheck", "alerts"]
+
+volumes:
+  pgdata:

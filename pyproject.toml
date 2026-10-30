@@ -1,0 +1,51 @@
+[project]
+name = "market-pulse"
+version = "0.1.0"
+description = "Market Pulse: index analysis & signal platform (analysis only, no order placement)"
+requires-python = ">=3.12,<3.13"
+dependencies = ["mp-core", "mp-services", "mp-mcp"]
+
+[tool.uv.workspace]
+members = ["packages/*", "services", "mcp"]
+
+[tool.uv.sources]
+mp-core = { workspace = true }
+mp-services = { workspace = true }
+mp-mcp = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "redis>=5.2",
+    "psycopg[binary]>=3.2",
+    "playwright>=1.48",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/core/tests", "mcp/tests", "services/tests", "tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+markers = [
+    "integration: needs `docker compose up` (Redis + TimescaleDB)",
+    "perf: browser performance test (Edge + Redis; ~2 minutes)",
+]
+# temp datasets go under the repo (D:), not %TEMP% on the system drive
+addopts = "-m 'not integration and not perf' --basetemp=.pytest_tmp"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "DTZ"]
+ignore = ["UP046", "UP047"]  # keep Generic[T] style; PEP 695 syntax adds nothing here
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["E501", "DTZ"]  # wide CSV fixtures; naive datetimes are tested on purpose
+
+[tool.ruff.lint.isort]
+known-first-party = ["mp_core", "mp_mcp", "mp_services"]
+known-local-folder = ["conftest", "test_infra"]
