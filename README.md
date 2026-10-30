@@ -84,6 +84,17 @@ uv run mp backtest expected_range --from 2025-01-01 --to 2025-12-31 [--zips data
 uv run mp evaluate                              # score pending real signals now
 ```
 
+## Setup (macOS, one command)
+
+```bash
+bash setup_mac.sh https://github.com/<you>/market-pulse.git   # fresh Mac (download scripts/setup_mac.sh first)
+bash scripts/setup_mac.sh                                       # or from inside an existing clone
+```
+
+Installs Homebrew, git, gh, uv, Python 3.12 and Docker Desktop if missing, creates `.env` (generated
+database password; optional keys asked with hidden input), builds a synthetic dataset ending today, starts
+all services and opens the dashboard. Re-running keeps existing `.env` values, data and volumes.
+
 ## Setup (Windows)
 
 ```powershell
