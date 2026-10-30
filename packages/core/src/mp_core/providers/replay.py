@@ -38,6 +38,7 @@ from mp_core.settings import TTLs, get_settings
 # Longest real-time pause between two replayed ticks (gaps between sessions are compressed to this).
 MAX_GAP_SLEEP_S = 2.0
 
+
 class ReplayProvider(MarketDataProvider):
     def __init__(
         self, directory: str | Path, clock: Clock, *, speed: float | None = None, ttls: TTLs | None = None

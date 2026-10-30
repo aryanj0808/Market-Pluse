@@ -11,6 +11,9 @@ const IMPACT = {
   low: "bg-slate-700 text-slate-300",
 };
 
+/** Feeds are untrusted: only plain web links become clickable (never javascript: or data:). */
+const isWebLink = (url: string) => /^https?:\/\//i.test(url);
+
 const Item = memo(function Item({ n }: { n: NewsRow }) {
   const synthetic = n.source === "synthetic";
   return (
@@ -24,7 +27,7 @@ const Item = memo(function Item({ n }: { n: NewsRow }) {
         <span className="ml-auto">{istDateTime(n.published_at)}</span>
       </div>
       <div className="mt-0.5 text-[13px] leading-snug text-slate-100">
-        {synthetic ? n.title : (
+        {synthetic || !isWebLink(n.url) ? n.title : (
           <a href={n.url} target="_blank" rel="noreferrer noopener" className="hover:underline">
             {n.title}
           </a>

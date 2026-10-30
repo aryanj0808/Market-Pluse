@@ -259,6 +259,21 @@ claude mcp add options     -- uv --directory D:/Aryan/Trading run options-mcp
 
 Every tool returns compact JSON: `{symbol, source, as_of, stale, now, data}`. Tools are read-only.
 
+## Security
+
+- **Secrets** live only in `.env` (git-ignored, excluded from the Docker image). Each container
+  receives only the credentials it uses (`x-no-secrets` in the compose file); the broker API secrets
+  never enter a container - they are used by the login CLI on the host.
+- **Logs** pass through a redacting formatter (`mp_core.logs`): bot tokens, API keys, `Authorization`
+  values, OAuth `code`/`request_token` query values and database passwords are replaced with
+  `<redacted>`; HTTP client request lines are not logged.
+- **Network**: every port is published on 127.0.0.1 only. The gateway and MCP servers reject other
+  `Host` names (DNS rebinding) and requests from other websites (`Origin`), so a page open in your
+  browser cannot ask Claude on your key or read the stream. Add names with `MP_ALLOWED_HOSTS`.
+- **Untrusted input**: news links must be http(s) (no `javascript:`), headlines are rendered as text
+  and HTML-escaped in Telegram; Claude has no tools and only sees the read-only digest.
+- **No order placement** exists in any adapter. Containers run as a non-root user.
+
 ## Data provenance
 
 Every value is wrapped in `Sourced[T]` with `source`, `as_of` (UTC) and `stale` (computed against a TTL).

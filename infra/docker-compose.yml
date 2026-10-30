@@ -17,11 +17,27 @@ x-tcp-check: &tcp_check
   retries: 3
   start_period: 10s
 
+# Least privilege: env_file hands every .env value to every container, so each service starts with
+# all credentials blanked and gets back only the ones it uses (docker inspect shows the rest empty).
+# KITE_API_SECRET / UPSTOX_API_SECRET are only needed by the login CLI on the host - no container.
+x-no-secrets: &no_secrets
+  POSTGRES_PASSWORD: ""  # services get the database through DATABASE_URL
+  ANTHROPIC_API_KEY: ""
+  KITE_API_KEY: ""
+  KITE_API_SECRET: ""
+  KITE_ACCESS_TOKEN: ""
+  UPSTOX_API_KEY: ""
+  UPSTOX_API_SECRET: ""
+  UPSTOX_ACCESS_TOKEN: ""
+  TELEGRAM_BOT_TOKEN: ""
+  TELEGRAM_CHAT_ID: ""
+
 x-app: &app
   image: market-pulse-app:dev  # built once by ingest-market (see `build:` there)
   pull_policy: never
   env_file: ../.env
-  environment:
+  environment: &app_env
+    <<: *no_secrets
     REDIS_URL: redis://redis:6379/0
     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
     MP_REPLAY_DIR: /app/data/replay/synthetic/BANKNIFTY
@@ -70,6 +86,12 @@ services:
     build: { context: .., dockerfile: Dockerfile }
     pull_policy: build
     command: ["ingest-market"]
+    environment:
+      <<: *app_env
+      KITE_API_KEY: ${KITE_API_KEY:-}
+      KITE_ACCESS_TOKEN: ${KITE_ACCESS_TOKEN:-}
+      UPSTOX_API_KEY: ${UPSTOX_API_KEY:-}
+      UPSTOX_ACCESS_TOKEN: ${UPSTOX_ACCESS_TOKEN:-}
     healthcheck:
       <<: *heartbeat
       test: ["CMD", "healthcheck", "ingest-market"]
@@ -86,8 +108,7 @@ services:
     <<: *app
     command: ["market-data-mcp"]
     environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
+      <<: *app_env
       MP_MCP_TRANSPORT: streamable-http
       MP_MCP_HOST: 0.0.0.0
       MP_MCP_PORT: "8101"
@@ -100,7 +121,7 @@ services:
     <<: *app
     command: ["options-mcp"]
     environment:
-      REDIS_URL: redis://redis:6379/0
+      <<: *app_env
       MP_MCP_TRANSPORT: streamable-http
       MP_MCP_HOST: 0.0.0.0
       MP_MCP_PORT: "8102"
@@ -116,9 +137,8 @@ services:
       <<: *heartbeat
       test: ["CMD", "healthcheck", "ingest-news"]
     environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
-      MP_REPLAY_DIR: /app/data/replay/synthetic/BANKNIFTY
+      <<: *app_env
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}  # Haiku news classification
       # replay at 60x: polling every 5 wall seconds = every 5 market minutes
       MP_NEWS_POLL_SECONDS: ${MP_NEWS_POLL_SECONDS:-5}
 
@@ -126,7 +146,7 @@ services:
     <<: *app
     command: ["news-mcp"]
     environment:
-      REDIS_URL: redis://redis:6379/0
+      <<: *app_env
       MP_MCP_TRANSPORT: streamable-http
       MP_MCP_HOST: 0.0.0.0
       MP_MCP_PORT: "8103"
@@ -139,8 +159,7 @@ services:
     <<: *app
     command: ["signals-mcp"]
     environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
+      <<: *app_env
       MP_MCP_TRANSPORT: streamable-http
       MP_MCP_HOST: 0.0.0.0
       MP_MCP_PORT: "8104"
@@ -160,8 +179,8 @@ services:
     <<: *app
     command: ["gateway"]
     environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale:5432/${POSTGRES_DB:-market_pulse}
+      <<: *app_env
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}  # Ask Claude
       MP_GATEWAY_HOST: 0.0.0.0
       MP_GATEWAY_PORT: "8000"
     ports: ["127.0.0.1:8000:8000"]
@@ -175,6 +194,10 @@ services:
   alerts:  # Telegram; dry run (logs only) until TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set
     <<: *app
     command: ["alerts"]
+    environment:
+      <<: *app_env
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     healthcheck:
       <<: *heartbeat
       test: ["CMD", "healthcheck", "alerts"]

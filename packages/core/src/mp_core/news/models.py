@@ -6,8 +6,9 @@ from __future__ import annotations
 import hashlib
 from enum import StrEnum
 from typing import Literal
+from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from mp_core.models import AwareDatetime, Source, StrictModel
 
@@ -44,6 +45,15 @@ class RawNewsItem(StrictModel):
     published_estimated: bool = False  # feed gave no date; fetch time used instead
     fetched_at: AwareDatetime
     source: Source
+
+    @field_validator("url")
+    @classmethod
+    def _web_link(cls, v: str) -> str:
+        # Feeds are untrusted and the dashboard renders this as a link: no javascript:/data: URLs.
+        u = urlparse(v)
+        if u.scheme.lower() not in ("http", "https") or not u.netloc:
+            raise ValueError("news url must be an http(s) link")
+        return v
 
     @property
     def id(self) -> str:

@@ -24,10 +24,12 @@ import time
 from collections import defaultdict, deque
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import anthropic
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -35,6 +37,7 @@ from mp_core.assistant import MAX_QUESTION_CHARS, Assistant, verify_numbers
 from mp_core.digest import market_digest
 from mp_core.health import read as read_health
 from mp_core.models import InstrumentKey, StrictModel
+from mp_core.net import allowed_hosts
 from mp_core.news.models import Impact
 from mp_core.news.score import entity_weights, relevant_items
 from mp_core.news.store import NewsStore
@@ -61,6 +64,13 @@ def _symbol(symbol: str) -> str:
     return InstrumentKey.parse(symbol if ":" in symbol else f"NSE:{symbol}").symbol
 
 
+def _origin_ok(origin: str | None, hosts: list[str]) -> bool:
+    """Browsers send Origin on POST and WebSocket requests. Only pages served from an allowed host
+    may use them, so another website open in the same browser cannot ask Claude (spending API
+    credit) or read the stream. No Origin (curl, scripts, MCP clients) is allowed."""
+    return origin is None or (urlparse(origin).hostname or "") in hosts
+
+
 def _json(body: str) -> Response:
     return Response(content=body, media_type="application/json", headers={"Cache-Control": "no-store"})
 
@@ -76,6 +86,7 @@ def create_app(
     ask_per_minute: int = 6,
     rest_rate: float = 20.0,
     rest_burst: float = 40.0,
+    hosts: list[str] | None = None,
 ) -> FastAPI:
     """Clients get at most `max_per_sec` diffs in any 1-second window (see mp_core.stream).
     `assistant` None disables Ask-Claude (503); questions are limited per client and in flight."""
@@ -86,6 +97,9 @@ def create_app(
         allow_methods=["GET"],
         allow_headers=["*"],
     )
+    hosts = hosts if hosts is not None else allowed_hosts()
+    # Rejects any other Host header: a DNS-rebinding page cannot reach the API through its own name.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     news = NewsStore(store.kv)
     buckets: dict[str, tuple[float, float]] = {}  # client -> (tokens, last refill)
 
@@ -93,6 +107,8 @@ def create_app(
     async def rate_limit(request: Request, call_next):
         """Token bucket per client for the REST API (the stream and health checks are exempt)."""
         path = request.url.path
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not _origin_ok(request.headers.get("origin"), hosts):
+            return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
         if path.startswith("/api/") and path != "/api/health" and not path.startswith("/api/stream"):
             who = request.client.host if request.client else "?"
             now_m = time.monotonic()
@@ -256,6 +272,9 @@ def create_app(
         except HTTPException:
             await ws.close(code=4404)
             return
+        if not _origin_ok(ws.headers.get("origin"), hosts):
+            await ws.close(code=4403)
+            return
         await ws.accept()
         stop = asyncio.Event()
         streamer = SnapshotStreamer(store, sym, ws.send_text, max_per_sec=max_per_sec, min_gap=min_gap)
@@ -307,5 +326,6 @@ def main() -> None:
         host=os.environ.get("MP_GATEWAY_HOST", "127.0.0.1"),
         port=int(os.environ.get("MP_GATEWAY_PORT", "8000")),
         log_level="info",
+        log_config=None,  # uvicorn logs through our redacting root handler (the Kite redirect hits "/")
         ws_ping_interval=20,
     )

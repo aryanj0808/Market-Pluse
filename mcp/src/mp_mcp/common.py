@@ -13,9 +13,12 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 
 from mp_core.digest import compact
+from mp_core.logs import configure_logging
 from mp_core.models import InstrumentKey, Sourced, derived_source
+from mp_core.net import allowed_hosts
 from mp_core.registry import get_index
 from mp_core.settings import get_settings
 from mp_core.snapshot import MarketSnapshot
@@ -83,7 +86,7 @@ def deps_from_env() -> Deps:
 
 def serve(factory: Callable[[Deps], MCPServer], default_port: int) -> None:
     """Run a server. MP_MCP_TRANSPORT=stdio (default, for Claude Desktop/Code) or streamable-http."""
-    logging.basicConfig(level=os.environ.get("MP_LOG_LEVEL", "INFO"))
+    configure_logging(os.environ.get("MP_LOG_LEVEL", "INFO"))
     if sys.platform == "win32":  # async psycopg (get_candles) needs a selector loop on Windows
         import asyncio
 
@@ -95,6 +98,11 @@ def serve(factory: Callable[[Deps], MCPServer], default_port: int) -> None:
             "streamable-http",
             host=os.environ.get("MP_MCP_HOST", "127.0.0.1"),
             port=int(os.environ.get("MP_MCP_PORT", default_port)),
+            # The SDK only protects 127.0.0.1 binds; in Docker we bind 0.0.0.0, so set it explicitly.
+            transport_security=TransportSecuritySettings(
+                allowed_hosts=[f"{h}:*" for h in allowed_hosts()],
+                allowed_origins=[f"http://{h}:*" for h in allowed_hosts()],
+            ),
         )
     else:
         server.run("stdio")

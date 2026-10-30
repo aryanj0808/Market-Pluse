@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import sys
 from datetime import datetime
 
 from mp_core import market_calendar as cal
 from mp_core.clock import SimClock
+from mp_core.logs import configure_logging
 from mp_core.providers.base import MarketDataProvider
 from mp_core.providers.replay import ReplayProvider
 from mp_core.settings import Settings
@@ -24,9 +24,7 @@ def run_async(coro) -> None:
 
 
 def setup_logging() -> None:
-    logging.basicConfig(
-        level=os.environ.get("MP_LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(levelname)s %(message)s"
-    )
+    configure_logging(os.environ.get("MP_LOG_LEVEL", "INFO"))
 
 
 async def make_live_provider(s: Settings) -> MarketDataProvider:
