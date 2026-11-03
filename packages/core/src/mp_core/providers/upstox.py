@@ -49,7 +49,7 @@ from mp_core.models import (
     Tick,
     stamp,
 )
-from mp_core.providers.base import DataUnavailable, MarketDataProvider
+from mp_core.providers.base import DataUnavailable, MarketDataProvider, ProviderAuthError
 from mp_core.registry import get_index
 from mp_core.settings import TTLs, get_settings
 
@@ -76,7 +76,7 @@ class UpstoxError(RuntimeError):
     pass
 
 
-class UpstoxAuthError(UpstoxError):
+class UpstoxAuthError(UpstoxError, ProviderAuthError):
     """401: the access token is missing, wrong or expired (they expire daily)."""
 
 
@@ -311,6 +311,9 @@ class UpstoxProvider(MarketDataProvider):
         )
 
     # ------------------------------------------------------------------ interface
+    def lot_size(self, key: InstrumentKey) -> int | None:
+        return self.instruments.lot_size.get(key.id) or None
+
     async def get_quote(self, key: InstrumentKey) -> Sourced[Quote]:
         q = (await self._full_quotes([key])).get(key.id)
         if q is None:

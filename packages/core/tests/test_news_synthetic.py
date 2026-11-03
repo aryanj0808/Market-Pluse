@@ -56,9 +56,11 @@ def test_gap_days_get_matching_preopen_story(synth_dir, news_files):
 
 
 async def test_news_reaches_the_snapshot(synth_dir, news_files):
+    events = [DayLabel.model_validate(x) for x in json.loads((synth_dir / "events.json").read_text())]
+    gap_down = next(e.day for e in events if e.is_gap_day and e.gap_pct < 0 and e.day > events[0].day)
     kv = MemoryKV()
     market = MarketStore(kv)
-    p = ReplayProvider(synth_dir, SimClock(ist(date(2026, 9, 23), 9, 15)))
+    p = ReplayProvider(synth_dir, SimClock(ist(gap_down, 9, 15)))
     await Ingestor(p, market, "NSE:BANKNIFTY").run(max_ticks=60)
     ing = NewsIngestor(
         [FixtureSource(news_files[0], "synthetic")],
@@ -68,7 +70,7 @@ async def test_news_reaches_the_snapshot(synth_dir, news_files):
         market=market,
     )
     stats = await ing.poll_once()
-    assert stats["classified"] > 20 and stats["duplicates"] > 0 and stats["dropped"] == 0
+    assert stats["classified"] > 10 and stats["duplicates"] > 0 and stats["dropped"] == 0
     engine = Engine(market, "NSE:BANKNIFTY")
     snap = await engine.compute_once()
     n = snap.news

@@ -17,7 +17,7 @@ from mp_mcp.common import Deps, check_symbol, dumps, envelope, require_snapshot,
 
 INSTRUCTIONS = (
     "Precomputed analysis for NSE indices. get_market_snapshot answers most questions in one call. "
-    "Signals come from a transparent rule set (fusion-v1): each reason cites the snapshot input that "
+    "Signals come from a transparent rule set (fusion-v2): each reason cites the snapshot input that "
     "produced it - quote those reasons rather than inventing your own. A status of 'no_signal' is a "
     "valid answer; give its no_signal_reasons. If source is 'synthetic' or stale is true, say so. This "
     "is an analysis tool: never present a signal as a recommendation to trade."

@@ -1,5 +1,8 @@
 """Rule-based fusion of technical, options and news inputs into a signal - fully transparent.
 
+fusion-v2 (from v1): every level on the spot scale (futures VWAP moved by the basis), reward:risk and
+the loss budget include round-trip costs and slippage, lot size from the broker, no signal on a holiday.
+
     component scores (each in [-1, 1], each built from Reasons that cite their snapshot input)
       technical  0.35   futures vs session VWAP, spot vs CPR, spot vs prior-day range
       options    0.35   PCR (OI), futures OI build-up (last 3 bars), pull to max pain near expiry
@@ -33,7 +36,7 @@ from mp_core.registry import get_index
 from mp_core.signals.models import ComponentScore, Reason, Signal, Sizing, Target, Zone
 from mp_core.snapshot import MarketSnapshot
 
-RULES_VERSION = "fusion-v1"
+RULES_VERSION = "fusion-v2"
 WEIGHTS = {"technical": 0.35, "options": 0.35, "news": 0.30}
 BIAS_THRESHOLD = 0.20
 CONFLICT_THRESHOLD = 0.30
@@ -55,15 +58,58 @@ LEVEL_PRIORITY = {
 
 
 class RiskConfig:
-    def __init__(self, capital: float = 500_000.0, max_risk_pct: float = 1.0) -> None:
+    """Loss budget per trade, and what a round trip really costs on top of the stop distance.
+
+    cost_bps: exchange-side charges for one futures round trip, in basis points of notional
+              (STT on the sell side ~2, exchange transaction ~0.35, stamp duty ~0.2, SEBI fee,
+              GST on charges - about 2.7 in total; 3 by default).
+    slippage_bps: expected slippage per fill (entry and exit), basis points of price. A stop
+              exit is a market order in a falling market, so this is not zero.
+    brokerage_per_order: INR per executed order (flat-fee discount brokers: 20)."""
+
+    def __init__(
+        self,
+        capital: float = 500_000.0,
+        max_risk_pct: float = 1.0,
+        *,
+        cost_bps: float = 3.0,
+        slippage_bps: float = 1.0,
+        brokerage_per_order: float = 20.0,
+    ) -> None:
         if capital <= 0 or not 0 < max_risk_pct <= 5:
             raise ValueError("capital must be > 0 and max_risk_pct in (0, 5]")
+        if cost_bps < 0 or slippage_bps < 0 or brokerage_per_order < 0:
+            raise ValueError("costs cannot be negative")
         self.capital = capital
         self.max_risk_pct = max_risk_pct
+        self.cost_bps = cost_bps
+        self.slippage_bps = slippage_bps
+        self.brokerage_per_order = brokerage_per_order
+
+    @classmethod
+    def from_settings(cls, s) -> RiskConfig:
+        return cls(
+            s.capital,
+            s.max_risk_pct,
+            cost_bps=s.cost_bps,
+            slippage_bps=s.slippage_bps,
+            brokerage_per_order=s.brokerage_per_order,
+        )
+
+    def cost_points(self, price: float, lot_size: int) -> float:
+        """Round-trip cost of one lot expressed in index points (so it can be added to a stop distance)."""
+        return price * (self.cost_bps + 2 * self.slippage_bps) / 10_000 + 2 * self.brokerage_per_order / lot_size
 
     @property
     def max_loss(self) -> float:
         return self.capital * self.max_risk_pct / 100.0
+
+
+def _to_tick(price: float, tick: float, direction: int) -> float:
+    """Round onto the exchange price grid: direction -1 rounds down, +1 up."""
+    steps = price / tick
+    steps = math.floor(steps + 1e-9) if direction < 0 else math.ceil(steps - 1e-9)
+    return round(steps * tick, 10)
 
 
 def _clip(x: float) -> float:
@@ -87,9 +133,9 @@ def _technical(s: MarketSnapshot) -> ComponentScore:
         )
     lv, spot = s.levels.value, s.quote.value.ltp
     vw, up = _level(lv, "vwap.session"), _level(lv, "vwap.upper_1sd")
-    if vw is not None and up is not None and s.future is not None and up.price > vw.price:
-        fut = s.future.value.ltp  # VWAP is computed on the futures, so compare like with like
-        z = (fut - vw.price) / (up.price - vw.price)
+    if vw is not None and up is not None and up.price > vw.price:
+        # levels are all on the spot scale (the futures VWAP is moved there by the basis)
+        z = (spot - vw.price) / (up.price - vw.price)
         eff = _clip(z / 2) * 0.4
         reasons.append(
             Reason(
@@ -97,7 +143,7 @@ def _technical(s: MarketSnapshot) -> ComponentScore:
                 input="levels[vwap.session]",
                 value=round(vw.price, 2),
                 effect=eff,
-                text=f"futures {fut:,.1f} is {z:+.2f} sd from session VWAP {vw.price:,.1f}",
+                text=f"spot {spot:,.1f} is {z:+.2f} sd from session VWAP {vw.price:,.1f} (basis-adjusted)",
             )
         )
     tc, bc = _level(lv, "pivot.cpr.TC"), _level(lv, "pivot.cpr.BC")
@@ -179,7 +225,7 @@ def _options(s: MarketSnapshot) -> ComponentScore:
                 )
     if s.future is not None and s.future.value.buildup_15m:
         recent = s.future.value.buildup_15m[-3:]
-        b = sum(o.buildup.bias for o in recent) / 3
+        b = sum(o.buildup.bias for o in recent) / len(recent)
         if any(o.buildup is not Buildup.NEUTRAL for o in recent):
             names = ", ".join(o.buildup.value for o in recent)
             reasons.append(
@@ -298,6 +344,9 @@ def fuse(s: MarketSnapshot, risk: RiskConfig | None = None) -> Signal:
     blockers: list[str] = []
     reasons: list[Reason] = []
 
+    day = s.computed_at.astimezone(cal.IST).date()
+    if not cal.is_trading_day(day):
+        blockers.append(f"market closed: {day} is not an NSE trading day")
     stale_critical = [sec for sec in CRITICAL_SECTIONS if sec in s.stale_sections]
     if s.expiries and f"expiry:{s.expiries[0].value.expiry}" in s.stale_sections:
         stale_critical.append("front expiry")
@@ -358,7 +407,12 @@ def fuse(s: MarketSnapshot, risk: RiskConfig | None = None) -> Signal:
         invalidation = nxt
         targets = _targets(levels, entry, sigma, up)
         risk_pts = abs(entry - stop)
-        rr = abs(targets[0].price - entry) / risk_pts if risk_pts > 0 else None
+        spec = get_index(s.symbol)
+        lot = (s.future.value.lot_size if s.future is not None else None) or spec.lot_size
+        cost_pts = risk.cost_points(spot, lot)
+        reward_pts = abs(targets[0].price - entry)
+        # reward:risk after costs: costs shrink the reward and widen the loss
+        rr = (reward_pts - cost_pts) / (risk_pts + cost_pts) if risk_pts > 0 else None
         reasons.append(
             Reason(
                 component="risk",
@@ -367,7 +421,7 @@ def fuse(s: MarketSnapshot, risk: RiskConfig | None = None) -> Signal:
                 effect=0,
                 text=f"entry zone {zone.low:,.0f}-{zone.high:,.0f} from {zone.basis[0]}; stop "
                 f"{stop:,.0f} beyond {invalidation:,.0f}; first target {targets[0].price:,.0f} "
-                f"({targets[0].basis}); reward:risk {rr:.2f}"
+                f"({targets[0].basis}); reward:risk {rr:.2f} after ~{cost_pts:.0f} pts of costs"
                 if rr
                 else "invalid stop",
             )
@@ -375,14 +429,29 @@ def fuse(s: MarketSnapshot, risk: RiskConfig | None = None) -> Signal:
         if rr is None or rr < MIN_REWARD_RISK:
             blockers.append(f"reward:risk {rr or 0:.2f} below {MIN_REWARD_RISK}")
         if s.future is not None and risk_pts > 0:
-            lot = get_index(s.symbol).lot_size
-            per_lot = risk_pts * lot
+            if s.future.value.lot_size is None and not spec.verified:
+                reasons.append(
+                    Reason(
+                        component="risk",
+                        input="registry.lot_size",
+                        value=lot,
+                        effect=0,
+                        text=f"lot size {lot} from indices.toml (unverified) - the provider did not supply one",
+                    )
+                )
+            per_lot = (risk_pts + cost_pts) * lot
             lots = math.floor(risk.max_loss / per_lot)
+            # the orders would go on the future: same levels shifted by the basis, on the tick grid,
+            # rounded so the entry is no worse and the stop no tighter than the plan
+            basis = s.future.value.basis_points
             sizing = Sizing(
                 instrument=s.future.value.key.id,
                 lot_size=lot,
                 entry=entry,
                 stop_loss=stop,
+                future_entry=_to_tick(entry + basis, spec.tick_size, -1 if up else 1),
+                future_stop_loss=_to_tick(stop + basis, spec.tick_size, -1 if up else 1),
+                costs_per_lot=cost_pts * lot,
                 risk_per_lot=per_lot,
                 max_loss=risk.max_loss,
                 lots=lots,

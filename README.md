@@ -1,6 +1,7 @@
 # Market Pulse
 
-Index analysis & signal platform for NSE:BANKNIFTY / NIFTY / FINNIFTY. Analysis only - no order placement.
+Index analysis & signal platform for NSE:BANKNIFTY / NIFTY / FINNIFTY, with **paper** trading of its
+signals (opt-in). No live order placement exists - see [Trading](#trading-paper-only).
 
 ```
 packages/core/   models, providers, analytics, snapshot engine, stores (all business logic, all numbers)
@@ -56,24 +57,35 @@ Settings: `MP_NEWS_MODE` (live | fixture | auto), `MP_NEWS_POLL_SECONDS`, `MP_NE
 ### Signals, risk and evaluation (Phase 5)
 
 The engine fuses each snapshot into a signal with a fixed, documented rule set (`signals/fusion.py`,
-`rules_version: fusion-v1`):
+`rules_version: fusion-v2`):
 
 | Component | Weight | Inputs |
 |---|---|---|
-| technical | 0.35 | futures vs session VWAP, spot vs CPR, spot vs prior-day range |
+| technical | 0.35 | spot vs session VWAP (basis-adjusted), spot vs CPR, spot vs prior-day range |
 | options | 0.35 | PCR (OI), last 3 futures OI build-ups, pull to max pain within 2 days of expiry |
 | news | 0.30 | the news score |
 
 `composite = sum(w*s)/sum(w)` over available components; bullish/bearish beyond +/-0.20; confidence =
 strength x agreement x completeness. Zones, stop, invalidation and targets come from levels judged by
 their position relative to price, and from the expected range. Every reason cites the snapshot input it
-came from. **No signal** when a critical input is stale or missing, when components conflict, when the
-composite is neutral, when reward:risk < 1.2, or when one lot's stop distance exceeds the loss budget
-(`MP_CAPITAL`, `MP_MAX_RISK_PCT`; sizing is a suggestion - nothing is ever traded).
+came from. **No signal** on an NSE holiday, when a critical input is stale or missing, when components
+conflict, when the composite is neutral, when reward:risk *after costs* < 1.2, or when one lot's stop
+distance plus costs exceeds the loss budget (`MP_CAPITAL`, `MP_MAX_RISK_PCT`).
+
+fusion-v2 (v1 signals stay labelled v1):
+- **One price scale.** All levels are in index terms; the session VWAP (computed on the futures, the
+  index has no volume) is moved onto it by the live basis. v1 mixed the two, putting entries and
+  targets a whole basis (~75-250 pts on BankNifty) away from where they belonged.
+- **Costs.** `MP_COST_BPS` (round-trip charges, default 3), `MP_SLIPPAGE_BPS` (per fill, default 1),
+  `MP_BROKERAGE_PER_ORDER` (default INR 20) - about 30 index points per BankNifty round trip. They
+  shrink the reward and widen the risk in reward:risk, and are part of the per-lot loss.
+- **Orders on the future.** Sizing carries `future_entry` / `future_stop_loss` (level + basis, on the
+  0.05 tick grid, rounded so the entry is no worse and the stop no tighter) and the lot size from the
+  broker's instrument list (indices.toml only as a cited fallback).
 
 Signals are logged to Timescale with their inputs (on every status/bias change and every 15 minutes).
 The `evaluator` scores them nightly: did price fill the entry, hit target or stop first (a bar touching
-both counts as the stop), MFE/MAE, and did the close stay inside the 1/2-sigma range. **Synthetic signals
+both counts as the stop; a target in the very bar that filled is not credited), MFE/MAE, and did the close stay inside the 1/2-sigma range. **Synthetic signals
 are never scored** - excluded in code and rejected by a CHECK constraint - and stats say so instead of
 printing numbers.
 
@@ -82,7 +94,55 @@ uv run mp signal --day 2026-09-22 --time 11:15  # the fused signal at a replay m
 uv run mp bhavcopy-load data/bhavcopy/*.zip     # load real NSE F&O EOD files into fo_eod
 uv run mp backtest expected_range --from 2025-01-01 --to 2025-12-31 [--zips data/bhavcopy/*.zip]
 uv run mp evaluate                              # score pending real signals now
+uv run mp replay-backtest --dir <dataset> [--from --to] [--allow-synthetic]   # intraday, see below
 ```
+
+**Intraday backtest of the live rules** (`signals/replay_backtest.py`): steps a replay dataset through
+the same path as the engine (`gather_inputs -> build_snapshot -> fuse -> SignalLogger`), then trades the
+logged signals like an account would - one position at a time, an unfilled entry replaced by the next
+logged signal - on futures 1m bars, net of costs: win rate, expectancy per trade, P&L, max drawdown.
+News is not included (no news poll in a replay). Synthetic data runs only with `--allow-synthetic` and
+then measures the pipeline, **not an edge**: on the seed-2 dataset fusion-v2 loses (win rate ~30%,
+about -17 pts per trade after costs), which is what a rule set should do on data with no edge in it.
+Real evidence needs recorded real sessions in the replay format.
+
+## Trading (paper only)
+
+```
+engine snapshot -> SignalLogger (status/bias change, 15-min heartbeat - same moments as the backtest)
+   -> RiskGate -> OrderManager -> PaperBroker      (+ KillSwitch, breakers, reconciliation, audit)
+```
+
+`docker compose -f infra/docker-compose.yml --env-file .env --profile trading up -d` adds the `trader`
+service (`MP_TRADING_MODE=paper`). It needs no broker credentials: the paper broker fills against the
+engine's futures quotes (limits at their price, never better; stops at the worse of trigger and market,
+minus slippage; it can fill partially and it does **not** de-duplicate, like a real broker).
+
+- **Risk gate** (entries only - exits are never blocked): loss per trade (`MP_MAX_RISK_PCT`), daily loss
+  (`MP_DAILY_LOSS_LIMIT_PCT`, default 2% - realized + unrealized - charges), drawdown from the equity
+  peak (`MP_MAX_DRAWDOWN_PCT`), `MP_MAX_OPEN_LOTS` (1), `MP_MAX_TRADES_PER_DAY` (3), one position at a
+  time, entries 09:15-15:00 IST on trading days, square-off 15:20, `MP_FREEZE_QTY` cap.
+- **Orders:** entry LIMIT at `future_entry`; once filled, an SL-M stop and a LIMIT target for exactly the
+  filled quantity (resized on partial fills, one-cancels-other). Every order carries an idempotency key
+  that fits the broker's order tag: the same intent is never placed twice, a lost response is found by
+  tag and adopted, and when the broker cannot be asked the trader halts instead of guessing.
+- **Kill switch** (`mp halt "reason" [--flatten]`, `mp resume`, `mp trading-status`): one Redis flag every
+  trading process obeys. Breakers set it automatically - daily loss or drawdown limit (and flatten),
+  3 rejections in a row (flatten), stale market data for 60 s with a position open, broker positions
+  differing from ours twice in a row, any order whose state is uncertain (no flatten: our view is what
+  is in doubt). Only a person can resume.
+- **Audit trail:** every risk decision, order, fill, cancel, reconciliation, breaker and trade, one
+  hash-chained JSONL file per IST day in `data/audit/` (`mp audit-verify data/audit/*.jsonl` detects
+  any edited or deleted line). Halts and closed trades go to Telegram.
+
+**Rollout gates before any real money** - there is deliberately no live broker adapter
+(`MP_TRADING_MODE=live` is refused):
+1. record real sessions (`MP_PROVIDER=kite`) and run `mp replay-backtest` on them: >= 3 months, >= 30
+   trades, positive expectancy after costs;
+2. paper-trade with the `trader` service for >= 2 weeks **and** >= 30 filled trades, with zero
+   reconciliation mismatches and zero duplicate orders in the audit trail;
+3. only then a live adapter (Kite orders, own container and API key, SEBI retail-algo requirements -
+   broker algo ID, static IP, order-rate limit) - 1 lot, a small daily loss cap, kill switch tested on day 1.
 
 ## Setup (macOS, one command)
 
@@ -288,7 +348,11 @@ for development only; evaluation refuses to score it (also enforced by a CHECK c
 - This development network blocks NSE, RBI, all three broker APIs and the news sites, so live
   recording and live news polling have to run from another network (home, a cloud VM) or after an
   IT whitelist. The feed URLs in `news_feeds.toml` are `verified = false` until fetched once.
-- `mp_core/data/holidays.toml` is empty - fill it from NSE's official holiday circular.
+- NSE holidays for 2025-2026 are in `mp_core/data/holidays.toml` (cross-checked against broker copies of
+  NSE's circular, which this network blocks - re-check against the circular). Add each new year before
+  it starts: live ingestion refuses to start for a year that is not listed. Muhurat sessions and
+  short-notice closures are not modelled.
+- No exporter yet from recorded Timescale sessions to the replay format `mp replay-backtest` reads.
 - Lot sizes / expiry rules in `indices.toml` are `verified = false` until checked against a real bhavcopy.
 - The bhavcopy loader is written to NSE's published layout but has not yet parsed a real file.
 - Not yet run against real services (blocked on this network or awaiting credentials): Claude (Haiku news

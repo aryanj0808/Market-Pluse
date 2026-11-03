@@ -1,7 +1,11 @@
 """The ingest -> cache -> engine pipeline. Services are thin `main()`s around these classes.
 
 Ingestor: drives a MarketDataProvider, writes raw data to the MarketStore (Redis), records it to
-          Timescale, and announces each update on `mp:{SYM}:raw`.
+          Timescale, and announces each update on `mp:{SYM}:raw`. Quotes are handled on the tick;
+          the slower refreshes (1m bars, chains, constituents) run beside the tick loop in live
+          mode, so a slow or failing history API can never hold quotes back. A provider error in
+          a refresh is counted and logged and the refresh is tried again next time; only an auth
+          error (the daily token expired) stops ingestion.
 Engine:   on raw updates (debounced), loads inputs from the store, runs `build_snapshot`, writes
           the snapshot and announces it on `mp:{SYM}:updates`.
 """
@@ -20,7 +24,7 @@ from mp_core.analytics.options import iv_summary
 from mp_core.clock import SimClock
 from mp_core.models import InstrumentKey, Interval, Tick
 from mp_core.news.store import NewsStore
-from mp_core.providers.base import DataUnavailable, MarketDataProvider
+from mp_core.providers.base import DataUnavailable, MarketDataProvider, ProviderAuthError
 from mp_core.registry import get_index
 from mp_core.signals.fusion import RiskConfig, fuse
 from mp_core.signals.logger import SignalLogger
@@ -62,6 +66,7 @@ class Ingestor:
         self._recorded_upto: dict[str, datetime] = {}
         self._tick_buf: list[Tick] = []
         self._started = False
+        self._refresher: asyncio.Task | None = None
         self.stats = {
             "ticks": 0,
             "chains": 0,
@@ -69,6 +74,7 @@ class Ingestor:
             "recorded_ticks": 0,
             "recorded_quotes": 0,
             "record_errors": 0,
+            "provider_errors": 0,
         }
 
     def _now(self) -> datetime:
@@ -88,11 +94,28 @@ class Ingestor:
             log.debug("unavailable: %s", ex)
             return None
 
+    async def _guard(self, what: str, coro) -> bool:
+        """Run one refresh. A provider failure (timeout, 5xx after retries, a malformed response)
+        must not end ingestion: count it, log it at 1, 10, 100 and every 1000, and carry on - the
+        data goes stale, the snapshot says so, and the next refresh tries again. Auth errors and
+        cancellation propagate."""
+        try:
+            await coro
+            return True
+        except (ProviderAuthError, asyncio.CancelledError):
+            raise
+        except Exception as ex:
+            self.stats["provider_errors"] += 1
+            n = self.stats["provider_errors"]
+            if n in (1, 10, 100) or n % 1000 == 0:
+                log.warning("refreshing %s failed (%d provider errors so far): %r", what, n, ex)
+            return False
+
     # ------------------------------------------------------------------ refreshers
     async def _on_new_day(self, now: datetime) -> None:
         self._day = now.astimezone(cal.IST).date()
         fut = front_future_key(self.symbol, self._day)
-        await self.store.put_future_key(self.symbol, fut)
+        await self.store.put_future_key(self.symbol, fut, self.p.lot_size(fut))
         daily = await self._opt(self.p.get_candles(self.key, Interval.D1, now - timedelta(days=14), now))
         if daily is not None:
             await self.store.put_candles(self.symbol, "daily", self.key, daily)
@@ -169,27 +192,42 @@ class Ingestor:
                 log.warning("recording %s failed (%d failures so far): %s", what, n, ex)
             return -1
 
+    async def _refresh_due(self, now: datetime) -> None:
+        minute = now.replace(second=0, microsecond=0)
+        if self._last_minute != minute:
+            self._last_minute = minute
+            await self._guard("1m bars", self._refresh_minute(now))
+        if self._last_chain is None or now - self._last_chain >= self.chain_poll:
+            self._last_chain = now
+            await self._guard("option chains", self._refresh_chains(now))
+        if self._last_slow is None or now - self._last_slow >= self.slow_poll:
+            self._last_slow = now
+            await self._guard("constituents/macro", self._refresh_slow(now))
+
+    async def _wait_refresher(self) -> None:
+        if self._refresher is not None:
+            task, self._refresher = self._refresher, None
+            await task
+
     # ------------------------------------------------------------------ main loop
     async def on_tick(self, tick: Tick) -> None:
         now = self._now()
         await self.store.set_clock(now, self.mode)
         if self._day != now.astimezone(cal.IST).date():
-            await self._on_new_day(now)
+            await self._wait_refresher()  # a new day resets the refresh schedule
+            await self._guard("new day", self._on_new_day(now))
         q = await self._opt(self.p.get_quote(tick.key))
         if q is not None:
             await self.store.put_quote(self.symbol, q)
         self._tick_buf.append(tick)
         self.stats["ticks"] += 1
-        minute = now.replace(second=0, microsecond=0)
-        if self._last_minute != minute:
-            self._last_minute = minute
-            await self._refresh_minute(now)
-        if self._last_chain is None or now - self._last_chain >= self.chain_poll:
-            self._last_chain = now
-            await self._refresh_chains(now)
-        if self._last_slow is None or now - self._last_slow >= self.slow_poll:
-            self._last_slow = now
-            await self._refresh_slow(now)
+        if self.mode == "replay":
+            # replays stay deterministic: every refresh happens at the tick that made it due
+            await self._refresh_due(now)
+        elif self._refresher is None or self._refresher.done():
+            if self._refresher is not None:
+                self._refresher.result()  # surfaces an auth error from the last run
+            self._refresher = asyncio.create_task(self._refresh_due(now))
         if len(self._tick_buf) >= self.tick_flush:
             await self._flush_ticks()
         await self.store.notify_raw(self.symbol, "quote", key=tick.key.id)
@@ -209,7 +247,12 @@ class Ingestor:
                 await self.on_tick(tick)
                 if max_ticks is not None and self.stats["ticks"] >= max_ticks:
                     break
+            await self._wait_refresher()
         finally:
+            if self._refresher is not None and not self._refresher.done():
+                self._refresher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._refresher
             await self._flush_ticks()
         return self.stats
 

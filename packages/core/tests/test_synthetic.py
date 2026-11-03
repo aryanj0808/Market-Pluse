@@ -176,7 +176,7 @@ def test_front_and_next_month_trade_and_oi_rolls(synth_dir):
         for c in bars:
             keys_by_day.setdefault(c.ts.astimezone(cal.IST).date(), set()).add(k)
     assert keys_by_day[date(2026, 9, 29)] == {"NSE:BANKNIFTY:2026-09-29", "NSE:BANKNIFTY:2026-10-27"}
-    assert keys_by_day[date(2026, 9, 30)] == {"NSE:BANKNIFTY:2026-10-27", "NSE:BANKNIFTY:2026-11-24"}
+    assert keys_by_day[date(2026, 9, 30)] == {"NSE:BANKNIFTY:2026-10-27", "NSE:BANKNIFTY:2026-11-23"}
     fut = _futures_by_key(synth_dir)
 
     def oi_at_close(key, d):

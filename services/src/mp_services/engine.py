@@ -23,7 +23,7 @@ async def run() -> None:
         MarketStore(kv),
         s.default_symbol,
         rate=s.risk_free_rate,
-        risk=RiskConfig(s.capital, s.max_risk_pct),
+        risk=RiskConfig.from_settings(s),
         history=history,
     )
     log.info("engine for %s (signal logging %s)", engine.symbol, "on" if history else "off: no DATABASE_URL")

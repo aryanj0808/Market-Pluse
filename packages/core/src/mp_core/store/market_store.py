@@ -9,6 +9,7 @@ Keys (one namespace per symbol):
     mp:{SYM}:daily:{instrument_id}        Sourced[list[Candle]]  recent daily bars
     mp:{SYM}:constituents                 Sourced[list[Constituent]]
     mp:{SYM}:future_key                   instrument id of the front-month future
+    mp:{SYM}:future_lot                   its lot size from the broker's instrument list (if known)
     mp:macro                              MacroSnapshot
     mp:{SYM}:snapshot                     MarketSnapshot
 Channels:
@@ -120,8 +121,9 @@ class MarketStore:
         raw = await self.kv.get("mp:macro")
         return MacroSnapshot.model_validate_json(raw) if raw else None
 
-    async def put_future_key(self, symbol: str, key: InstrumentKey) -> None:
+    async def put_future_key(self, symbol: str, key: InstrumentKey, lot_size: int | None = None) -> None:
         await self.kv.set(f"mp:{_sym(symbol)}:future_key", key.id)
+        await self.kv.set(f"mp:{_sym(symbol)}:future_lot", str(lot_size or ""))  # "" = unknown
 
     async def get_future_key(self, symbol: str) -> InstrumentKey | None:
         raw = await self.kv.get(f"mp:{_sym(symbol)}:future_key")
@@ -145,7 +147,9 @@ class MarketStore:
         an index quote."""
         sym = _sym(symbol)
         key = InstrumentKey.parse(sym)
-        exp_raw, fut_raw = await self.kv.mget([f"mp:{sym}:expiries", f"mp:{sym}:future_key"])
+        exp_raw, fut_raw, lot_raw = await self.kv.mget(
+            [f"mp:{sym}:expiries", f"mp:{sym}:future_key", f"mp:{sym}:future_lot"]
+        )
         expiries = [date.fromisoformat(x) for x in json.loads(exp_raw)] if exp_raw else []
         fut = InstrumentKey.parse(fut_raw) if fut_raw else None
         keys = {
@@ -176,6 +180,7 @@ class MarketStore:
             symbol=sym,
             quote=quote,
             future_quote=self._cached(keys.get("future_quote", ""), raw.get("future_quote"), _QUOTE.validate_json),
+            future_lot_size=int(lot_raw) if lot_raw and fut is not None else None,
             chains=chains,
             prev_chains=prev,
             daily=self._cached(keys["daily"], raw["daily"], _CANDLES.validate_json),

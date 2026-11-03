@@ -1,9 +1,48 @@
-# NSE trading holidays (equity & F&O segment), ISO dates.
+# NSE trading holidays (equity & F&O segment), ISO dates. Weekday closures only:
+# weekends are never trading days anyway.
 #
-# Deliberately empty: this machine's network blocks nseindia.com, and holiday dates
-# must not be guessed. Fill from NSE's official circular ("Trading holidays for the
-# calendar year"). Until a year is listed in `complete_years`, the calendar treats
-# every weekday as a trading day and `calendar.holidays_known(year)` returns False.
+# Source: NSE "Trading holidays for the calendar year" circulars (2026: dated 12 Dec 2025,
+# 15 weekday holidays), cross-checked against broker-published copies because this
+# machine's network blocks nseindia.com. Re-check against the circular when it is reachable.
+# A year is listed in `complete_years` only when every holiday of that year is here;
+# for any other year the calendar treats every weekday as a trading day and
+# `calendar.holidays_known(year)` returns False.
+#
+# Not modelled: Muhurat trading (a short evening session on Diwali Laxmi Pujan, a holiday
+# here: 2025-10-21, 2026-11-08 is a Sunday) and ad-hoc closures announced at short notice
+# (e.g. election days) - add those as they are notified.
 
-complete_years = []
-dates = []
+complete_years = [2025, 2026]
+dates = [
+    # 2025
+    "2025-02-26",  # Mahashivratri
+    "2025-03-14",  # Holi
+    "2025-03-31",  # Id-ul-Fitr (Ramadan Eid)
+    "2025-04-10",  # Shri Mahavir Jayanti
+    "2025-04-14",  # Dr. Baba Saheb Ambedkar Jayanti
+    "2025-04-18",  # Good Friday
+    "2025-05-01",  # Maharashtra Day
+    "2025-08-15",  # Independence Day
+    "2025-08-27",  # Ganesh Chaturthi
+    "2025-10-02",  # Mahatma Gandhi Jayanti / Dussehra
+    "2025-10-21",  # Diwali Laxmi Pujan (Muhurat session only)
+    "2025-10-22",  # Diwali Balipratipada
+    "2025-11-05",  # Prakash Gurpurb Sri Guru Nanak Dev
+    "2025-12-25",  # Christmas
+    # 2026
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Shri Ram Navami
+    "2026-03-31",  # Shri Mahavir Jayanti
+    "2026-04-03",  # Good Friday
+    "2026-04-14",  # Dr. Baba Saheb Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-05-28",  # Bakri Id
+    "2026-06-26",  # Muharram
+    "2026-09-14",  # Ganesh Chaturthi
+    "2026-10-02",  # Mahatma Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali Balipratipada
+    "2026-11-24",  # Prakash Gurpurb Sri Guru Nanak Dev
+    "2026-12-25",  # Christmas
+]

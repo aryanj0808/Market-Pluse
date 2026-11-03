@@ -130,7 +130,8 @@ async def _analyze(a: argparse.Namespace) -> None:
         exchange=idx.exchange, underlying=idx.underlying, expiry=cal.front_future_expiry(get_index(idx.symbol), day)
     )
     fut_today = (await p.get_candles(fut, Interval.M1, cal.session_bounds(day)[0], now)).value
-    levels = compute_levels(prior_day(daily, day), vwap(fut_today), chain)
+    fut_ltp = (await p.get_quote(fut)).value.ltp
+    levels = compute_levels(prior_day(daily, day), vwap(fut_today), chain, vwap_offset=spot - fut_ltp)
     below, above = nearest(levels, spot)
     print(
         f"  levels ({len(levels)}): nearest support {below.name} {below.price:,.0f} [{below.basis}]"
@@ -233,6 +234,85 @@ async def _backtest(a: argparse.Namespace) -> None:
     print(json.dumps(res.model_dump(mode="json"), indent=2))
 
 
+async def _replay_backtest(a: argparse.Namespace) -> None:
+    from mp_core.settings import get_settings
+    from mp_core.signals.fusion import RiskConfig
+    from mp_core.signals.replay_backtest import run_replay_backtest
+
+    s = get_settings()
+    res = await run_replay_backtest(
+        a.dir,
+        start=date.fromisoformat(a.start) if a.start else None,
+        end=date.fromisoformat(a.end) if a.end else None,
+        step=timedelta(seconds=a.step),
+        risk=RiskConfig.from_settings(s),
+        rate=s.risk_free_rate,
+        allow_synthetic=a.allow_synthetic,
+        progress=lambda d: print(f"  {d}", file=sys.stderr),
+    )
+    if a.json:
+        print(json.dumps(res.model_dump(mode="json"), indent=2))
+        return
+
+    def pct(x: float | None) -> str:
+        return "-" if x is None else f"{x:.0%}"
+
+    print(f"[{res.source}] {res.symbol} {res.rules_version}  {res.start} .. {res.end}  ({res.days} days)")
+    print(f"  snapshots {res.snapshots}   signals logged {res.signals_logged}   active {res.active}")
+    print(
+        f"  filled {res.filled}: target {res.targets}  stop {res.stops}  open {res.open}   win rate {pct(res.win_rate)}"
+    )
+    exp = "-" if res.expectancy_points is None else f"{res.expectancy_points:+.1f} pts"
+    print(f"  expectancy per filled trade (after costs) {exp}")
+    print(f"  total P&L INR {res.total_pnl_inr:+,.0f}   max drawdown INR {res.max_drawdown_inr:,.0f}")
+    for n in res.notes:
+        print(f"  note: {n}")
+
+
+async def _trading(a: argparse.Namespace) -> None:
+    """Kill switch and paper-trading status (needs Redis)."""
+    import getpass
+    from datetime import UTC
+
+    from mp_core.settings import get_settings
+    from mp_core.store import RedisKV
+    from mp_core.trading.killswitch import KillSwitch
+
+    s = get_settings()
+    kv = RedisKV(s.redis_url)
+    ks = KillSwitch(kv)
+    who = f"manual:{getpass.getuser()}"
+    try:
+        if a.cmd == "halt":
+            st = await ks.halt(a.reason, who, datetime.now(UTC), flatten=a.flatten)
+            print(f"HALTED: {st.reason} ({st.by})" + (" - positions will be flattened" if st.flatten else ""))
+        elif a.cmd == "resume":
+            before = await ks.state()
+            await ks.resume(who)
+            print(f"resumed (was halted: {before.reason} by {before.by})" if before.halted else "was not halted")
+        else:
+            st = await ks.state()
+            print(f"halt: {'HALTED - ' + str(st.reason) + ' (' + str(st.by) + ')' if st.halted else 'not halted'}")
+            from mp_core.models import InstrumentKey
+
+            raw = await kv.get(f"mp:{InstrumentKey.parse(s.default_symbol).symbol}:trading")
+            print(json.dumps(json.loads(raw), indent=2) if raw else "no trader state yet (is the trader running?)")
+    finally:
+        await kv.close()
+
+
+def _audit_verify(a: argparse.Namespace) -> None:
+    from mp_core.trading.audit import verify
+
+    bad = 0
+    for f in a.files:
+        ok, n, msg = verify(f)
+        bad += not ok
+        print(f"{f}: {msg} ({n} lines)")
+    if bad:
+        raise SystemExit(1)
+
+
 async def _evaluate(a: argparse.Namespace) -> None:
     from datetime import UTC
 
@@ -263,7 +343,7 @@ async def _signal(a: argparse.Namespace) -> None:
     p = ReplayProvider(a.dir, SimClock(now))
     s = get_settings()
     snap = build_snapshot(await gather_inputs(p, p.index_key.symbol, now), now, rate=s.risk_free_rate)
-    sig = fuse(snap, RiskConfig(s.capital, s.max_risk_pct))
+    sig = fuse(snap, RiskConfig.from_settings(s))
     print(
         f"[{sig.source}] {sig.symbol} @ {now:%Y-%m-%d %H:%M IST}  spot {sig.spot:,.1f}  1-sigma ({sig.horizon}) "
         f"{sig.sigma_points:,.0f} pts   (news not included: no news poll in this one-shot view)"
@@ -417,6 +497,20 @@ def main(argv: list[str] | None = None) -> None:
     bt.add_argument("--to", dest="end", required=True)
     bt.add_argument("--symbol", default="NSE:BANKNIFTY")
     bt.add_argument("--zips", nargs="*", help="read these bhavcopy zips instead of the database")
+    rb = sub.add_parser("replay-backtest", help="intraday backtest of the live signal rules over a replay dataset")
+    rb.add_argument("--dir", default="data/replay/synthetic/BANKNIFTY")
+    rb.add_argument("--from", dest="start")
+    rb.add_argument("--to", dest="end")
+    rb.add_argument("--step", type=int, default=60, help="seconds between snapshots (default 60)")
+    rb.add_argument("--allow-synthetic", action="store_true", help="run on synthetic data (a pipeline check only)")
+    rb.add_argument("--json", action="store_true")
+    hl = sub.add_parser("halt", help="kill switch: stop new entries now (paper trading)")
+    hl.add_argument("reason")
+    hl.add_argument("--flatten", action="store_true", help="also close open positions at market")
+    sub.add_parser("resume", help="clear the kill switch (only a person can)")
+    sub.add_parser("trading-status", help="kill switch state and the trader's positions / P&L")
+    av = sub.add_parser("audit-verify", help="check that audit files are intact (hash chain)")
+    av.add_argument("files", nargs="+")
     ev = sub.add_parser("evaluate", help="score past signals now (the evaluator service does this nightly)")
     ev.add_argument("--symbol", default="NSE:BANKNIFTY")
     b = sub.add_parser("bhavcopy", help="parse a downloaded F&O bhavcopy zip")
@@ -436,6 +530,12 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(_kite(a))
     elif a.cmd == "signal":
         asyncio.run(_signal(a))
+    elif a.cmd == "replay-backtest":
+        asyncio.run(_replay_backtest(a))
+    elif a.cmd in ("halt", "resume", "trading-status"):
+        asyncio.run(_trading(a))
+    elif a.cmd == "audit-verify":
+        _audit_verify(a)
     elif a.cmd == "synth-news":
         _cmd_synth_news(a)
     elif a.cmd == "news-eval":

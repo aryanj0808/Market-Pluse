@@ -28,7 +28,7 @@ def test_session_bounds_in_utc():
     [
         (2026, 9, date(2026, 9, 29)),
         (2026, 10, date(2026, 10, 27)),
-        (2026, 11, date(2026, 11, 24)),
+        (2026, 11, date(2026, 11, 23)),  # last Tuesday is Guru Nanak Jayanti
         (2026, 12, date(2026, 12, 29)),
     ],
 )
@@ -39,7 +39,7 @@ def test_monthly_expiry_last_tuesday(y, m, expected):
 def test_weekly_only_where_configured():
     nifty = cal.expiries(get_index("NIFTY"), date(2026, 10, 1), date(2026, 10, 31))
     bank = cal.expiries(get_index("BANKNIFTY"), date(2026, 10, 1), date(2026, 10, 31))
-    assert nifty == [date(2026, 10, d) for d in (6, 13, 20, 27)]
+    assert nifty == [date(2026, 10, d) for d in (6, 13, 19, 27)]  # 20th (Dussehra) rolls back to Monday
     assert bank == [date(2026, 10, 27)]
 
 
@@ -65,13 +65,25 @@ def test_years_to_expiry():
 
 
 def test_holiday_list_status_is_honest():
-    assert not cal.holidays_known(2026)  # nothing guessed; see data/holidays.toml
+    assert cal.holidays_known(2025) and cal.holidays_known(2026)
+    assert not cal.holidays_known(2027)  # nothing guessed; see data/holidays.toml
     assert not cal.is_trading_day(date(2026, 10, 3))  # Saturday
+
+
+def test_known_holidays_are_not_trading_days():
+    assert not cal.is_trading_day(date(2026, 10, 2))  # Gandhi Jayanti (a Friday)
+    assert not cal.is_trading_day(date(2025, 10, 22))  # Diwali Balipratipada
+    assert cal.is_trading_day(date(2026, 10, 1))
+    assert cal.next_trading_day(date(2026, 10, 1)) == date(2026, 10, 5)
+    # an expiry on a holiday moves to the previous trading day: Dussehra 2026 is a Tuesday
+    nifty = get_index("NIFTY")
+    assert date(2026, 10, 20) not in cal.expiries(nifty, date(2026, 10, 14), date(2026, 10, 22))
+    assert date(2026, 10, 19) in cal.expiries(nifty, date(2026, 10, 14), date(2026, 10, 22))
 
 
 def test_front_future_expiry_is_monthly_and_rolls():
     nifty = get_index("NIFTY")  # has weeklies, but futures are monthly
     assert cal.front_future_expiry(nifty, date(2026, 10, 1)) == date(2026, 10, 27)
     assert cal.front_future_expiry(nifty, date(2026, 10, 27)) == date(2026, 10, 27)
-    assert cal.front_future_expiry(nifty, date(2026, 10, 28)) == date(2026, 11, 24)
+    assert cal.front_future_expiry(nifty, date(2026, 10, 28)) == date(2026, 11, 23)  # 24th is a holiday
     assert cal.front_future_expiry(nifty, date(2026, 12, 30)) == date(2027, 1, 26)
