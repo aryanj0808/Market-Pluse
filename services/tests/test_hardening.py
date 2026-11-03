@@ -1,7 +1,7 @@
 """Phase 8 hardening: heartbeats, database outages, feed backoff, gateway health and rate limits."""
 
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import httpx
 import pytest
@@ -171,3 +171,122 @@ class TestGateway:
             r = await c.get("/api/snapshot/NSE:BANKNIFTY")
             assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
             assert (await c.get("/api/health")).status_code == 200  # health is exempt
+
+
+class FlakyProvider(ReplayProvider):
+    """A replay whose chain / history endpoints fail or are slow on demand."""
+
+    chain_error: Exception | None = None
+    candle_delay = 0.0
+
+    async def get_option_chain(self, underlying, expiry):
+        if self.chain_error is not None:
+            raise self.chain_error
+        return await super().get_option_chain(underlying, expiry)
+
+    async def get_candles(self, key, interval, start, end):
+        if self.candle_delay:
+            import asyncio
+
+            await asyncio.sleep(self.candle_delay)
+        return await super().get_candles(key, interval, start, end)
+
+
+class TestProviderErrors:
+    async def test_refresh_error_is_counted_not_fatal(self, dataset):
+        p = FlakyProvider(dataset, SimClock(ist(date(2026, 9, 22), 9, 15)))
+        p.chain_error = RuntimeError("HTTP 502 after retries")
+        store = MarketStore(MemoryKV())
+        ing = Ingestor(p, store, SYM, chain_poll=timedelta(seconds=30))
+        stats = await ing.run(max_ticks=40)
+        assert stats["ticks"] == 40 and stats["provider_errors"] >= 2 and stats["chains"] == 0
+        assert await store.get_quote(SYM, ing.key) is not None  # quotes kept flowing
+        p.chain_error = None
+        await ing.run(max_ticks=80)
+        assert ing.stats["chains"] > 0  # recovers on the next refresh
+
+    async def test_auth_error_stops_ingestion(self, dataset):
+        from mp_core.providers.base import ProviderAuthError
+
+        p = FlakyProvider(dataset, SimClock(ist(date(2026, 9, 22), 9, 15)))
+        p.chain_error = ProviderAuthError("token expired")
+        with pytest.raises(ProviderAuthError):
+            await Ingestor(p, MarketStore(MemoryKV()), SYM).run(max_ticks=5)
+
+    def test_broker_auth_errors_are_provider_auth_errors(self):
+        from mp_core.providers.base import ProviderAuthError
+        from mp_core.providers.kite import KiteAuthError, KiteError
+        from mp_core.providers.upstox import UpstoxAuthError
+
+        assert issubclass(KiteAuthError, ProviderAuthError) and issubclass(UpstoxAuthError, ProviderAuthError)
+        assert not issubclass(KiteError, ProviderAuthError)  # an ordinary failure is retried, not fatal
+
+    async def test_live_mode_slow_history_does_not_hold_quotes(self, dataset):
+        import asyncio
+
+        from mp_core.models import Tick
+
+        t0 = ist(date(2026, 9, 22), 10, 0)
+        p = FlakyProvider(dataset, SimClock(t0))
+        p.candle_delay = 0.5  # e.g. 18 history calls at 3/s
+        store = MarketStore(MemoryKV())
+        ing = Ingestor(p, store, SYM)
+        ing.mode = "live"
+        q = (await p.get_quote(ing.key)).value
+        await ing.on_tick(Tick(key=ing.key, ts=t0, ltp=q.ltp))  # first tick of the day loads daily bars inline
+        assert ing._refresher is not None and not ing._refresher.done()  # 1m bars / chains: in the background
+        started = time.perf_counter()
+        for i in (1, 2, 3):
+            p.clock.set(t0 + timedelta(seconds=i))
+            await ing.on_tick(Tick(key=ing.key, ts=p.clock.now(), ltp=q.ltp + i))
+        assert time.perf_counter() - started < 0.25  # no tick waited for the 0.5 s history calls
+        assert ing.stats["ticks"] == 4 and await store.get_quote(SYM, ing.key) is not None
+        await ing._wait_refresher()
+        assert ing.stats["candles"] >= 0 and ing.stats["provider_errors"] == 0
+        await asyncio.sleep(0)
+
+
+class TestTraderService:
+    def test_live_and_off_are_refused_and_limits_must_allow_a_trade(self):
+        from mp_core.settings import Settings
+        from mp_core.trading.audit import MemoryAudit
+        from mp_core.trading.setup import TradingRefused, paper_trader
+
+        kv, clock, audit = MemoryKV(), SimClock(ist(date(2026, 9, 22), 10, 0)), MemoryAudit()
+        with pytest.raises(TradingRefused, match="live is refused"):
+            paper_trader(Settings(trading_mode="live"), kv, clock, audit)
+        with pytest.raises(TradingRefused, match="set it to 'paper'"):
+            paper_trader(Settings(trading_mode="off"), kv, clock, audit)
+        with pytest.raises(TradingRefused, match="no trade could ever be taken"):
+            paper_trader(Settings(trading_mode="paper", max_risk_pct=3, daily_loss_limit_pct=1), kv, clock, audit)
+        trader, broker = paper_trader(Settings(trading_mode="paper"), kv, clock, audit)
+        assert broker.name == "paper" and trader.gate.limits.daily_loss_limit == 10_000
+
+    async def test_paper_trader_runs_over_a_replay(self, dataset):
+        """ingest -> engine -> trader on a replay: snapshots flow, decisions are audited, nothing breaks."""
+        from mp_core.settings import Settings
+        from mp_core.trading.audit import MemoryAudit
+        from mp_core.trading.setup import paper_trader
+
+        kv = MemoryKV()
+        store = MarketStore(kv)
+        p = ReplayProvider(dataset, SimClock(ist(date(2026, 9, 22), 9, 15)))
+        ing = Ingestor(p, store, SYM)
+        engine = Engine(store, SYM)
+        audit = MemoryAudit()
+        trader, broker = paper_trader(Settings(trading_mode="paper"), kv, p.clock, audit)
+        n = 0
+        async for tick in p.stream_ticks([ing.key, *ing._futures(date(2026, 9, 22))]):
+            await ing.on_tick(tick)
+            snap = await engine.compute_once()
+            if snap is None:
+                continue
+            if snap.future is not None:
+                broker.on_price(snap.future.value.key.id, snap.future.value.ltp, snap.computed_at)
+            await trader.on_snapshot(snap)
+            n += 1
+            if n >= 600:
+                break
+        assert n == 600 and "reconcile" in audit.kinds()
+        assert not (await trader.kill.state()).halted, (await trader.kill.state()).reason
+        assert all(r["ok"] for r in audit.rows if r["kind"] == "reconcile")

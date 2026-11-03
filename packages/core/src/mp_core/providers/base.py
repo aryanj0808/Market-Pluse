@@ -29,6 +29,11 @@ class DataUnavailable(LookupError):
     a pydantic ValidationError)."""
 
 
+class ProviderAuthError(RuntimeError):
+    """The broker rejected the credentials (expired daily token, revoked key). Retrying cannot help:
+    a person has to log in again, so this is the one provider error that stops ingestion."""
+
+
 class MarketDataProvider(ABC):
     source: Source
 
@@ -55,6 +60,11 @@ class MarketDataProvider(ABC):
 
     @abstractmethod
     def stream_ticks(self, keys: Sequence[InstrumentKey]) -> AsyncIterator[Tick]: ...
+
+    def lot_size(self, key: InstrumentKey) -> int | None:
+        """Exchange lot size of a derivative from the broker's instrument list; None when the
+        provider does not know it (callers fall back to indices.toml)."""
+        return None
 
     async def close(self) -> None:  # noqa: B027 - optional hook
         """Release connections. Default: nothing to release."""

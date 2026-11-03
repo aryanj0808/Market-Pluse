@@ -47,6 +47,7 @@ class EngineInputs(StrictModel):
     symbol: str
     quote: Sourced[Quote]
     future_quote: Sourced[Quote] | None = None
+    future_lot_size: int | None = None  # from the broker's instrument list; None -> indices.toml
     chains: dict[date, Sourced[OptionChain]] = {}
     prev_chains: dict[date, Sourced[OptionChain]] = {}  # previous snapshot per expiry (for build-up)
     daily: Sourced[list[Candle]] | None = None  # index daily bars, most recent last
@@ -61,6 +62,7 @@ class FuturesView(StrictModel):
     key: InstrumentKey
     ltp: float
     basis_points: float  # future - spot
+    lot_size: int | None = None  # broker instrument list; None when the provider does not know it
     oi: int | None
     buildup_15m: list[BuildupObs]  # most recent last
 
@@ -167,7 +169,14 @@ def build_snapshot(
                 used.append(inputs.future_1m_today)
             except ValueError as ex:
                 errors.append(f"futures buildup: {ex}")
-        view = FuturesView(key=fq.key, ltp=fq.ltp, basis_points=fq.ltp - spot, oi=fq.oi, buildup_15m=bu)
+        view = FuturesView(
+            key=fq.key,
+            ltp=fq.ltp,
+            basis_points=fq.ltp - spot,
+            lot_size=inputs.future_lot_size,
+            oi=fq.oi,
+            buildup_15m=bu,
+        )
         future = derive(view, used, now=now)
     else:
         errors.append("future: no front-month future quote")
@@ -180,20 +189,23 @@ def build_snapshot(
         try:
             pd = prior_day(inputs.daily.value, today)
             used = [inputs.daily]
-            vw = None
+            vw, offset = None, 0.0
             fut_bars = inputs.future_1m_today.value if inputs.future_1m_today else []
             fut_bars = [b for b in fut_bars if b.ts.astimezone(cal.IST).date() == today]
-            if fut_bars:
+            if not fut_bars:
+                errors.append("levels.vwap: no futures bars yet today")
+            elif inputs.future_quote is None:
+                errors.append("levels.vwap: no futures quote to move the futures VWAP onto the spot scale")
+            else:
                 try:
                     vw = vwap(fut_bars)
-                    used.append(inputs.future_1m_today)
+                    offset = spot - inputs.future_quote.value.ltp  # minus the basis
+                    used += [inputs.future_1m_today, inputs.future_quote]
                 except ValueError as ex:
                     errors.append(f"levels.vwap: {ex}")
-            else:
-                errors.append("levels.vwap: no futures bars yet today")
             if front is not None:
                 used.append(front)
-            levels = derive(compute_levels(pd, vw, front.value if front else None), used, now=now)
+            levels = derive(compute_levels(pd, vw, front.value if front else None, vwap_offset=offset), used, now=now)
         except ValueError as ex:
             errors.append(f"levels: {ex}")
 
@@ -279,6 +291,7 @@ async def gather_inputs(
         symbol=key.symbol,
         quote=await provider.get_quote(key),
         future_quote=await opt(provider.get_quote(fut)),
+        future_lot_size=provider.lot_size(fut),
         chains=chains,
         prev_chains=prev_chains or {},
         daily=await opt(provider.get_candles(key, Interval.D1, now - timedelta(days=10), now)),

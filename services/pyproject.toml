@@ -17,6 +17,7 @@ evaluator = "mp_services.evaluator:main"
 gateway = "mp_services.gateway:main"
 alerts = "mp_services.alerts:main"
 healthcheck = "mp_services.healthcheck:main"
+trader = "mp_services.trader:main"
 
 [tool.uv.sources]
 mp-core = { workspace = true }

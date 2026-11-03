@@ -58,7 +58,7 @@ from mp_core.models import (
     stamp,
 )
 from mp_core.net import ssl_verify
-from mp_core.providers.base import DataUnavailable, MarketDataProvider
+from mp_core.providers.base import DataUnavailable, MarketDataProvider, ProviderAuthError
 from mp_core.registry import get_index
 from mp_core.settings import TTLs, get_settings
 
@@ -82,7 +82,7 @@ class KiteError(RuntimeError):
     pass
 
 
-class KiteAuthError(KiteError):
+class KiteAuthError(KiteError, ProviderAuthError):
     """403 TokenException: missing, wrong or expired access token (they expire around 6 AM IST)."""
 
 
@@ -316,6 +316,9 @@ class KiteProvider(MarketDataProvider):
         )
 
     # ------------------------------------------------------------------ interface
+    def lot_size(self, key: InstrumentKey) -> int | None:
+        return self.instruments.lot_size.get(key.id) or None
+
     async def get_quote(self, key: InstrumentKey) -> Sourced[Quote]:
         sym = self.instruments.kite_symbol(key)
         hit = self._cache.get(sym)

@@ -4,7 +4,8 @@ from datetime import date, timedelta
 
 import pytest
 
-from mp_core.analytics.levels import Level, LevelKind
+from mp_core import market_calendar as cal
+from mp_core.analytics.levels import Level, LevelKind, vwap
 from mp_core.clock import SimClock
 from mp_core.models import Source
 from mp_core.providers.replay import ReplayProvider
@@ -18,12 +19,20 @@ from conftest import ist
 
 SYM = "NSE:BANKNIFTY"
 NOW = ist(date(2026, 9, 22), 11, 15)
+FREE = {"cost_bps": 0, "slippage_bps": 0, "brokerage_per_order": 0}  # isolates the geometry from costs
 
 
 @pytest.fixture(scope="module")
 async def snap(synth_dir):
     p = ReplayProvider(synth_dir, SimClock(NOW))
     return build_snapshot(await gather_inputs(p, SYM, NOW), NOW, rate=0.065, version=3)
+
+
+@pytest.fixture(scope="module")
+async def tradeable(synth_dir):
+    """A moment where a bullish setup clears reward:risk even after costs (seed 2)."""
+    t = ist(date(2026, 9, 21), 14, 0)
+    return build_snapshot(await gather_inputs(ReplayProvider(synth_dir, SimClock(t)), SYM, t), t, rate=0.065)
 
 
 def comp(name, score, available=True):
@@ -90,9 +99,10 @@ class TestAggregation:
 
 class TestTrade:
     @pytest.mark.parametrize("scores, up", [((0.8, 0.6, 0.4), True), ((-0.8, -0.6, -0.4), False)])
-    def test_entry_stop_targets_sizing(self, snap, fixed, scores, up):
+    def test_entry_stop_targets_sizing(self, tradeable, fixed, scores, up):
         fixed(*scores)
-        sig = fuse(snap, RiskConfig(capital=5_000_000, max_risk_pct=1))
+        risk_cfg = RiskConfig(capital=5_000_000, max_risk_pct=1, **(FREE if up else {}))
+        sig = fuse(tradeable, risk_cfg)
         assert sig.reward_risk is not None  # computed even when the signal is blocked
         if sig.status != "active":  # blocked signals never publish entry/stop/targets
             assert sig.entry is None and sig.stop_loss is None and sig.targets == []
@@ -104,15 +114,32 @@ class TestTrade:
             assert sig.stop_loss < zone.low <= sig.entry < sig.targets[0].price
         else:
             assert sig.stop_loss > zone.high >= sig.entry > sig.targets[0].price
-        assert sig.reward_risk == pytest.approx(abs(sig.targets[0].price - sig.entry) / abs(sig.entry - sig.stop_loss))
+        cost = risk_cfg.cost_points(sig.spot, 30)
+        reward, risk = abs(sig.targets[0].price - sig.entry), abs(sig.entry - sig.stop_loss)
+        assert sig.reward_risk == pytest.approx((reward - cost) / (risk + cost))
         s = sig.sizing
-        assert s.lot_size == 30 and s.risk_per_lot == pytest.approx(abs(sig.entry - sig.stop_loss) * 30)
+        assert s.lot_size == 30 and s.risk_per_lot == pytest.approx((risk + cost) * 30)
+        assert s.costs_per_lot == pytest.approx(cost * 30)
         assert s.lots == int(s.max_loss // s.risk_per_lot) and s.loss_at_stop <= s.max_loss
 
     def test_loss_budget_blocks(self, snap, fixed):
         fixed(0.8, 0.6, 0.4)
         sig = fuse(snap, RiskConfig(capital=10_000, max_risk_pct=0.5))  # INR 50 budget
         assert sig.status == "no_signal" and any("loss budget" in r for r in sig.no_signal_reasons)
+
+    def test_costs_shrink_reward_and_widen_risk(self, tradeable, fixed):
+        fixed(0.8, 0.6, 0.4)
+        free = fuse(tradeable, RiskConfig(5_000_000, 1, cost_bps=0, slippage_bps=0, brokerage_per_order=0))
+        paid = fuse(tradeable, RiskConfig(5_000_000, 1))
+        assert free.status == "active" and paid.reward_risk < free.reward_risk
+        assert free.reward_risk == pytest.approx(
+            abs(free.targets[0].price - free.entry) / abs(free.entry - free.stop_loss)
+        )
+
+    def test_cost_points(self):
+        r = RiskConfig(cost_bps=3, slippage_bps=1, brokerage_per_order=20)
+        # 50,000 x 5 bps = 25 pts, plus 2 x INR 20 over a 30-unit lot
+        assert r.cost_points(50_000, 30) == pytest.approx(25 + 40 / 30)
 
     def test_risk_config_validated(self):
         with pytest.raises(ValueError):
@@ -153,7 +180,7 @@ class TestRealSnapshot:
 
     def test_deterministic_and_synthetic(self, snap):
         a, b = fuse(snap), fuse(snap)
-        assert a == b and a.source is Source.SYNTHETIC and a.rules_version == "fusion-v1"
+        assert a == b and a.source is Source.SYNTHETIC and a.rules_version == "fusion-v2"
         assert a.signal_id != fuse(snap.model_copy(update={"version": 99})).signal_id
 
     def test_horizon_end(self, snap):
@@ -193,3 +220,58 @@ async def test_signal_logger_logs_changes_and_heartbeats(snap):
     assert "strikes" not in inputs["front_expiry"]["value"]["iv"]  # per-strike IVs are not logged (bulk)
     assert inputs["front_expiry"]["value"]["iv"]["atm_iv"] is not None
     assert len(hist.rows) == 3
+
+
+class TestV2:
+    """fusion-v2: one price scale, broker lot size, futures order prices, holidays."""
+
+    async def test_vwap_levels_are_on_the_spot_scale(self, synth_dir, snap):
+        inputs = await gather_inputs(ReplayProvider(synth_dir, SimClock(NOW)), SYM, NOW)
+        today = [b for b in inputs.future_1m_today.value if b.ts.astimezone(cal.IST).date() == NOW.date()]
+        fut_vwap = vwap(today)
+        basis = inputs.future_quote.value.ltp - inputs.quote.value.ltp
+        assert abs(basis) > 1  # the synthetic future trades at a premium, so the shift is visible
+        got = {lv.basis: lv.price for lv in snap.levels.value}
+        assert got["vwap.session"] == pytest.approx(fut_vwap.vwap - basis)
+        assert got["vwap.upper_1sd"] == pytest.approx(fut_vwap.upper_1sd - basis)
+
+    async def test_vwap_needs_the_futures_quote(self, synth_dir):
+        inputs = await gather_inputs(ReplayProvider(synth_dir, SimClock(NOW)), SYM, NOW)
+        s = build_snapshot(inputs.model_copy(update={"future_quote": None}), NOW, rate=0.065)
+        assert not any(lv.basis.startswith("vwap.") for lv in s.levels.value)  # never on the wrong scale
+        assert any("levels.vwap: no futures quote" in e for e in s.errors)
+
+    def test_futures_order_prices_are_shifted_and_on_tick(self, tradeable, fixed):
+        fixed(0.8, 0.6, 0.4)
+        sig = fuse(tradeable, RiskConfig(capital=5_000_000, max_risk_pct=1, **FREE))
+        assert sig.status == "active" and sig.sizing is not None
+        s, basis = sig.sizing, tradeable.future.value.basis_points
+        assert s.future_entry == pytest.approx(s.entry + basis, abs=0.05)
+        assert s.future_stop_loss == pytest.approx(s.stop_loss + basis, abs=0.05)
+        for px in (s.future_entry, s.future_stop_loss):
+            assert abs(px / 0.05 - round(px / 0.05)) < 1e-6
+        assert s.future_stop_loss <= s.stop_loss + basis  # bullish: stop never tighter after rounding
+
+    def test_broker_lot_size_wins_over_registry(self, tradeable, fixed):
+        fixed(0.8, 0.6, 0.4)
+        fut = tradeable.future.model_copy(update={"value": tradeable.future.value.model_copy(update={"lot_size": 35})})
+        sig = fuse(tradeable.model_copy(update={"future": fut}), RiskConfig(capital=5_000_000, max_risk_pct=1, **FREE))
+        assert sig.sizing.lot_size == 35
+        assert not any(r.input == "registry.lot_size" for r in sig.reasons)
+
+    def test_unverified_registry_lot_size_is_cited(self, tradeable, fixed):
+        fixed(0.8, 0.6, 0.4)
+        sig = fuse(tradeable, RiskConfig(capital=5_000_000, max_risk_pct=1, **FREE))
+        assert any(r.input == "registry.lot_size" for r in sig.reasons)
+
+    def test_no_signal_on_a_holiday(self, snap, fixed):
+        fixed(0.8, 0.6, 0.4)
+        holiday = snap.model_copy(update={"computed_at": ist(date(2026, 10, 2), 11, 15)})  # Gandhi Jayanti
+        sig = fuse(holiday)
+        assert sig.status == "no_signal" and any("not an NSE trading day" in r for r in sig.no_signal_reasons)
+
+
+def test_to_tick():
+    assert fusion._to_tick(100.03, 0.05, -1) == pytest.approx(100.0)
+    assert fusion._to_tick(100.03, 0.05, 1) == pytest.approx(100.05)
+    assert fusion._to_tick(100.05, 0.05, -1) == pytest.approx(100.05)  # already on the grid

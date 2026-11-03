@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     # risk (Phase 5) - position sizing suggestions only; nothing is ever traded
     capital: float = Field(default=500_000.0, gt=0)  # INR
     max_risk_pct: float = Field(default=1.0, gt=0, le=5)  # max loss per trade, % of capital
+    cost_bps: float = Field(default=3.0, ge=0)  # round-trip exchange charges + taxes, bps of notional
+    slippage_bps: float = Field(default=1.0, ge=0)  # per fill
+    brokerage_per_order: float = Field(default=20.0, ge=0)  # INR
+
+    # paper trading (services/trader). "live" is refused: no live broker adapter exists, by design,
+    # until the rollout gates are passed (README: Trading)
+    trading_mode: str = "off"  # off | paper
+    daily_loss_limit_pct: float = Field(default=2.0, gt=0, le=10)  # of capital; breaker halts + flattens
+    max_drawdown_pct: float = Field(default=6.0, gt=0, le=50)  # of capital, from the equity high-water mark
+    max_open_lots: int = Field(default=1, gt=0)
+    max_trades_per_day: int = Field(default=3, gt=0)
+    freeze_qty: int | None = None  # exchange freeze quantity (units per order) - set from NSE's circular
+    audit_dir: str = "data/audit"
 
     # alerts (Phase 7)
     telegram_bot_token: str | None = Field(default=None, validation_alias=AliasChoices("TELEGRAM_BOT_TOKEN"))

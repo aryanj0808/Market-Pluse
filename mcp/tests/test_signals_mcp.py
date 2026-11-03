@@ -84,7 +84,7 @@ async def test_market_snapshot_is_complete_and_fast(deps):
         "errors",
     } <= set(d["data"])
     sig = d["data"]["signal"]
-    assert sig["status"] in ("active", "no_signal") and sig["rules_version"] == "fusion-v1"
+    assert sig["status"] in ("active", "no_signal") and sig["rules_version"] == "fusion-v2"
     async with Client(signals.create_server(deps)) as c:
         times = []
         for _ in range(20):

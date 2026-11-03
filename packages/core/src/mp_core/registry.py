@@ -36,6 +36,7 @@ class IndexSpec(StrictModel):
     name: str
     strike_step: float = Field(gt=0)
     lot_size: int = Field(gt=0)
+    tick_size: float = Field(default=0.05, gt=0)  # price step of the futures / options
     weekly_expiry: str  # "" or a WEEKDAYS key
     monthly_expiry: str  # "LAST_<WEEKDAY>"
     verified: bool

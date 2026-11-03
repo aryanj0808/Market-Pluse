@@ -95,7 +95,9 @@ services:
     healthcheck:
       <<: *heartbeat
       test: ["CMD", "healthcheck", "ingest-market"]
-    restart: "no"  # a replay ends; a live feed would use unless-stopped
+    # a finished replay exits 0 and stays down; a crash (e.g. an expired token at 6 AM) is retried a few
+    # times, then left down so a bad token does not hammer the broker - `mp kite-login` and restart
+    restart: "on-failure:10"
 
   engine:
     <<: *app
@@ -201,6 +203,25 @@ services:
     healthcheck:
       <<: *heartbeat
       test: ["CMD", "healthcheck", "alerts"]
+
+  # Paper trading - opt in: `docker compose --profile trading ... up -d`. No broker credentials:
+  # the paper broker fills against the engine's futures quotes. Live mode is refused in code.
+  trader:
+    <<: *app
+    command: ["trader"]
+    profiles: ["trading"]
+    environment:
+      <<: *app_env
+      MP_TRADING_MODE: paper
+      MP_AUDIT_DIR: /app/audit
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ../data:/app/data:ro
+      - ../data/audit:/app/audit  # hash-chained audit trail, one file per day
+    healthcheck:
+      <<: *heartbeat
+      test: ["CMD", "healthcheck", "trader"]
 
 volumes:
   pgdata:

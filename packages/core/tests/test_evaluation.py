@@ -19,8 +19,8 @@ from mp_core.signals.evaluation import (
 from mp_core.signals.models import Signal, Target
 
 BN = InstrumentKey.parse("NSE:BANKNIFTY")
-DAY = date(2026, 10, 20)
-T0 = datetime(2026, 10, 20, 5, 0, tzinfo=UTC)  # 10:30 IST
+DAY = date(2026, 10, 21)
+T0 = datetime(2026, 10, 21, 5, 0, tzinfo=UTC)  # 10:30 IST
 
 
 def signal(
@@ -82,6 +82,14 @@ class TestScore:
 
     def test_stop_and_target_in_one_bar_counts_as_stop(self):
         assert score_signal(signal(), bars([(101, 99, 100), (112, 94, 100)])).outcome == "stop"
+
+    def test_target_in_the_fill_bar_is_not_credited(self):
+        # one bar dips to the entry and spikes to the target: the order of the two is unknown
+        o = score_signal(signal(), bars([(105, 101, 104), (111, 99, 108)]))
+        assert o.outcome == "open" and o.hit is None and o.mfe == 11
+
+    def test_stop_in_the_fill_bar_still_counts(self):
+        assert score_signal(signal(), bars([(105, 101, 104), (101, 94, 96)])).outcome == "stop"
 
     def test_not_filled(self):
         o = score_signal(signal(), bars([(105, 101, 104)]))
@@ -163,7 +171,7 @@ class FakeEvalHistory:
 
 
 async def test_evaluate_pending():
-    after_close = datetime(2026, 10, 20, 11, 0, tzinfo=UTC)
+    after_close = datetime(2026, 10, 21, 11, 0, tzinfo=UTC)
     h = FakeEvalHistory(
         [signal(), signal(source=Source.SYNTHETIC, sid="00000000-0000-0000-0000-000000000002")],
         bars([(101, 99, 100), (111, 100, 110)]),
@@ -172,7 +180,7 @@ async def test_evaluate_pending():
     stats = await evaluate_pending(h, "NSE:BANKNIFTY", after_close)
     assert stats == {"pending": 1, "scored": 1, "not_ready": 0, "refused_synthetic_bars": 0}
     assert h.recorded[0].outcome == "target"
-    before_close = datetime(2026, 10, 20, 8, 0, tzinfo=UTC)
+    before_close = datetime(2026, 10, 21, 8, 0, tzinfo=UTC)
     assert (await evaluate_pending(h, "NSE:BANKNIFTY", before_close))["not_ready"] == 1
     synth_bars = FakeEvalHistory([signal()], bars([(101, 99, 100)]), {"synthetic"})
     assert (await evaluate_pending(synth_bars, "NSE:BANKNIFTY", after_close))["refused_synthetic_bars"] == 1

@@ -139,9 +139,18 @@ def oi_levels(chain: OptionChain, top_n: int = 2) -> list[Level]:
 
 
 def compute_levels(
-    pd: PriorDay, session_vwap: Vwap | None = None, chain: OptionChain | None = None, top_n: int = 2
+    pd: PriorDay,
+    session_vwap: Vwap | None = None,
+    chain: OptionChain | None = None,
+    top_n: int = 2,
+    *,
+    vwap_offset: float = 0.0,
 ) -> list[Level]:
-    """All levels, sorted by price. Inputs that are missing are simply not used."""
+    """All levels in index (spot) terms, sorted by price. Inputs that are missing are simply not used.
+
+    The session VWAP is computed on the futures (the index has no volume), so it is in futures
+    prices; `vwap_offset` (= spot - future, i.e. minus the basis) moves it onto the spot scale
+    every other level is on. Mixing the two would put an entry or stop a whole basis away."""
     pv = pivots(pd.high, pd.low, pd.close)
     R, S, P, REF = LevelKind.RESISTANCE, LevelKind.SUPPORT, LevelKind.PIVOT, LevelKind.REFERENCE
     out = [
@@ -160,9 +169,9 @@ def compute_levels(
     ]
     if session_vwap is not None:
         out += [
-            Level(name="VWAP", price=session_vwap.vwap, kind=P, basis="vwap.session"),
-            Level(name="VWAP +1sd", price=session_vwap.upper_1sd, kind=R, basis="vwap.upper_1sd"),
-            Level(name="VWAP -1sd", price=session_vwap.lower_1sd, kind=S, basis="vwap.lower_1sd"),
+            Level(name="VWAP", price=session_vwap.vwap + vwap_offset, kind=P, basis="vwap.session"),
+            Level(name="VWAP +1sd", price=session_vwap.upper_1sd + vwap_offset, kind=R, basis="vwap.upper_1sd"),
+            Level(name="VWAP -1sd", price=session_vwap.lower_1sd + vwap_offset, kind=S, basis="vwap.lower_1sd"),
         ]
     if chain is not None:
         out += oi_levels(chain, top_n)

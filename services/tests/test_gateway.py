@@ -272,7 +272,7 @@ class TestAsk:
         assert meta["source"] == "synthetic" and meta["model"] == "claude-sonnet-5-5"
         assert done["unverified_numbers"] == ["1,23,456"]  # the spot checks out; the invented level does not
         question, digest = fa.questions[0]
-        assert question == "What is the setup?" and digest["data"]["signal"]["rules_version"] == "fusion-v1"
+        assert question == "What is the setup?" and digest["data"]["signal"]["rules_version"] == "fusion-v2"
 
     async def test_refusal_becomes_an_error_event(self, market):
         async with await self.client(market, FakeAssistant(refuse=True)) as c:

@@ -21,6 +21,7 @@ data/bhavcopy/
 data/recordings/
 data/upstox/
 data/kite/
+data/audit/
 
 # editors / OS
 .vscode/

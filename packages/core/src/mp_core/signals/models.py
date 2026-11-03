@@ -44,9 +44,12 @@ class Target(StrictModel):
 class Sizing(StrictModel):
     instrument: str  # futures contract the sizing refers to
     lot_size: int
-    entry: float
+    entry: float  # index terms, like every level
     stop_loss: float
-    risk_per_lot: float  # INR
+    future_entry: float | None = None  # entry/stop on the future itself: index level + basis, on the tick grid
+    future_stop_loss: float | None = None
+    costs_per_lot: float = 0.0  # INR: charges + slippage + brokerage for a round trip (included in risk_per_lot)
+    risk_per_lot: float  # INR, stop distance + costs
     max_loss: float  # INR, the configured budget
     lots: int  # floor(max_loss / risk_per_lot)
     loss_at_stop: float  # lots * risk_per_lot

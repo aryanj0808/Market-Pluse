@@ -5,6 +5,8 @@ Per signal, once its horizon has closed and 1-minute index bars cover it:
   * for active signals, a conservative trade walk over the bars after the signal:
       - filled only if price reaches the entry (bullish: low <= entry; bearish: high >= entry)
       - after the fill, a bar touching both stop and target counts as the stop (worst case)
+      - in the bar that fills, only the stop can be hit: which came first inside that minute -
+        the fill or the target - is unknown, so a target there is not credited
       - outcome target | stop | open (neither by the horizon close) | not_filled
       - MFE / MAE: best / worst excursion from entry after the fill, in index points
 """
@@ -37,12 +39,18 @@ class Outcome(StrictModel):
     contained_1s: bool
     contained_2s: bool
     source: Source
+    fill_ts: datetime | None = None  # open time of the bar that filled the entry
+    exit_ts: datetime | None = None  # open time of the bar that hit the stop or target
 
 
-def score_signal(signal: Signal, bars: Sequence[Candle]) -> Outcome | None:
+def score_signal(
+    signal: Signal, bars: Sequence[Candle], *, allow_synthetic: bool = False, cancel_at: datetime | None = None
+) -> Outcome | None:
     """None until the horizon has closed and the bars reach it. (Bar provenance is checked by the
-    caller with `check_bars_real` - candles themselves do not carry a source.)"""
-    if signal.source is Source.SYNTHETIC:
+    caller with `check_bars_real` - candles themselves do not carry a source.) `allow_synthetic` is
+    for pipeline checks on synthetic replays only; such outcomes stay labelled synthetic. `cancel_at`: the
+    entry order is withdrawn then if it has not filled (the signal changed or ended)."""
+    if signal.source is Source.SYNTHETIC and not allow_synthetic:
         raise SyntheticDataRefused(f"signal {signal.signal_id} is synthetic - not scored")
     end = horizon_end(signal)
     after = sorted((b for b in bars if signal.ts <= b.ts < end), key=lambda b: b.ts)
@@ -69,22 +77,24 @@ def score_signal(signal: Signal, bars: Sequence[Candle]) -> Outcome | None:
     up = signal.bias == "bullish"
     entry, stop, target = signal.entry, signal.stop_loss, signal.targets[0].price
     filled, outcome, mfe, mae = False, "open", 0.0, 0.0
+    fill_ts = exit_ts = None
     for b in after:
+        fill_bar = False
         if not filled:
+            if cancel_at is not None and b.ts >= cancel_at:
+                break
             if (b.low <= entry) if up else (b.high >= entry):
-                filled = True
+                filled = fill_bar = True
+                fill_ts = b.ts
             else:
                 continue
         fav = (b.high - entry) if up else (entry - b.low)
         adv = (entry - b.low) if up else (b.high - entry)
         mfe, mae = max(mfe, fav), max(mae, adv)
         hit_stop = (b.low <= stop) if up else (b.high >= stop)
-        hit_target = (b.high >= target) if up else (b.low <= target)
-        if hit_stop:
-            outcome = "stop"
-            break
-        if hit_target:
-            outcome = "target"
+        hit_target = not fill_bar and ((b.high >= target) if up else (b.low <= target))
+        if hit_stop or hit_target:
+            outcome, exit_ts = ("stop" if hit_stop else "target"), b.ts
             break
     if not filled:
         return Outcome(
@@ -110,6 +120,26 @@ def score_signal(signal: Signal, bars: Sequence[Candle]) -> Outcome | None:
         contained_1s=contained_1s,
         contained_2s=contained_2s,
         source=signal.source,
+        fill_ts=fill_ts,
+        exit_ts=exit_ts,
+    )
+
+
+def as_future_trade(signal: Signal) -> Signal | None:
+    """The same signal with entry, stop and targets moved onto the future it would be traded on
+    (the levels plus the basis captured at signal time), so it can be scored on futures bars.
+    None when the signal carries no futures prices."""
+    sz = signal.sizing
+    if sz is None or sz.future_entry is None or sz.future_stop_loss is None or signal.entry is None:
+        return None
+    basis = sz.future_entry - sz.entry
+    return signal.model_copy(
+        update={
+            "entry": sz.future_entry,
+            "stop_loss": sz.future_stop_loss,
+            "targets": [t.model_copy(update={"price": t.price + basis}) for t in signal.targets],
+            "spot": signal.spot + basis,
+        }
     )
 
 

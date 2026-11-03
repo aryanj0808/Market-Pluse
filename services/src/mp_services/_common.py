@@ -28,6 +28,10 @@ def setup_logging() -> None:
 
 
 async def make_live_provider(s: Settings) -> MarketDataProvider:
+    year = datetime.now(cal.IST).year
+    if not cal.holidays_known(year):
+        # expiries, days to expiry and session horizons would all be wrong on a holiday
+        raise SystemExit(f"NSE holidays for {year} are not in mp_core/data/holidays.toml - add them before going live")
     if s.provider == "upstox":
         from mp_core.providers.upstox import provider_from_settings
 
